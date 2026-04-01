@@ -8,7 +8,8 @@ Pixel Studio is different. An AI agent picks up a brush, places pixels on a canv
 
 Built with LangGraph + Gemini/OpenAI. Runs locally with a web UI.
 
-https://github.com/EYamanS/pixel-studio/raw/main/demo.mp4
+https://github.com/user-attachments/assets/bc2c0e85-062a-4f5e-ac7c-b8c0d91fe63d
+
 
 ## How it works
 
