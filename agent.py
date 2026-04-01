@@ -291,8 +291,9 @@ def make_tools(canvas: Canvas):
 
     @tool
     def view_canvas() -> str:
-        """View the current canvas state. Returns the pixel index grid with coordinates and color usage summary. Use this to check your work."""
+        """View the current canvas state. Returns the pixel index grid, color usage summary, and a base64 PNG preview image of the rendered sprite. Use this to check your work visually."""
         grid = canvas.to_grid_string()
+        img_b64 = canvas.to_image_b64(64)
 
         color_counts: dict[int, int] = {}
         for row in canvas.pixels:
@@ -307,7 +308,7 @@ def make_tools(canvas: Canvas):
                 summary.append(f"{idx}({canvas.palette[idx]}): {count}px")
 
         total = sum(c for i, c in color_counts.items() if i >= 0)
-        return f"{grid}\n\nCOLOR USAGE: {', '.join(summary[:12])}\nFilled: {total}/{canvas.size*canvas.size}px"
+        return f"{grid}\n\nCOLOR USAGE: {', '.join(summary[:12])}\nFilled: {total}/{canvas.size*canvas.size}px\n\n[RENDERED PREVIEW base64 PNG 64x64]\n{img_b64}"
 
     @tool
     def get_pixel(x: int, y: int) -> str:

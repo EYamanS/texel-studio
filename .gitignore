@@ -4,3 +4,11 @@ __pycache__/
 output/
 references/
 .env
+service-account.json
+
+# Frontend build output (regenerable via `cd frontend && npm run build`)
+static/
+
+# Node
+frontend/node_modules/
+frontend/.next/
