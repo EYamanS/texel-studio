@@ -96,6 +96,27 @@ class Canvas:
                 count += 1
         return f"Filled column x={x}, {count} pixels"
 
+    def draw_rotated_rect(self, cx: int, cy: int, w: int, h: int, angle_deg: float, color: int) -> int:
+        """Draw a filled rotated rectangle. cx,cy = center, w,h = full width/height, angle_deg = rotation."""
+        import math
+        rad = math.radians(angle_deg)
+        cos_a, sin_a = math.cos(rad), math.sin(rad)
+        hw, hh = w / 2, h / 2
+        # Check bounding box
+        max_r = math.ceil(math.sqrt(hw * hw + hh * hh)) + 1
+        count = 0
+        for py in range(max(0, cy - max_r), min(self.size, cy + max_r + 1)):
+            for px in range(max(0, cx - max_r), min(self.size, cx + max_r + 1)):
+                # Rotate point into rect's local space
+                dx = px - cx
+                dy = py - cy
+                lx = dx * cos_a + dy * sin_a
+                ly = -dx * sin_a + dy * cos_a
+                if abs(lx) <= hw and abs(ly) <= hh:
+                    self.pixels[py][px] = color
+                    count += 1
+        return count
+
     def to_image(self) -> Image.Image:
         img = Image.new("RGBA", (self.size, self.size), (0, 0, 0, 0))
         for y, row in enumerate(self.pixels):
@@ -342,6 +363,12 @@ def make_tools(canvas: Canvas):
         count = canvas.draw_triangle(x1, y1, x2, y2, x3, y3, color)
         return f"Drew triangle ({x1},{y1})-({x2},{y2})-({x3},{y3}), {count}px"
 
+    @tool
+    def draw_rotated_rect(cx: int, cy: int, width: int, height: int, angle: float, color: int) -> str:
+        """Draw a filled rotated rectangle. cx,cy = center position. width,height = full dimensions. angle = rotation in degrees (0=horizontal, 45=diagonal, etc)."""
+        count = canvas.draw_rotated_rect(cx, cy, width, height, angle, color)
+        return f"Drew rotated rect at ({cx},{cy}) {width}x{height} angle={angle}deg, {count}px"
+
     # ── Noise tools ──
 
     @tool
@@ -364,7 +391,7 @@ def make_tools(canvas: Canvas):
 
     return [
         draw_pixel, draw_pixels, fill_rect, fill_row, fill_column, draw_line,
-        draw_circle, draw_ellipse, draw_triangle,
+        draw_circle, draw_ellipse, draw_triangle, draw_rotated_rect,
         noise_fill_rect, noise_fill_circle, voronoi_fill,
         view_canvas, get_pixel, finish,
     ]
@@ -460,6 +487,7 @@ TOOLS AVAILABLE:
 - fill_rect, fill_row, fill_column — fill rectangular areas
 - draw_circle, draw_ellipse — round shapes (filled or outline)
 - draw_triangle — filled triangles
+- draw_rotated_rect — filled rectangle at any angle (center, width, height, angle in degrees)
 - draw_line — 1px lines
 - draw_pixel, draw_pixels — individual pixels
 - noise_fill_rect, noise_fill_circle — fill areas with random color distribution (great for texture)
