@@ -19,7 +19,7 @@ from typing import Optional, List
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from PIL import Image
 from google import genai
@@ -351,11 +351,11 @@ def load_reference_b64(ref_id: str | None) -> str | None:
     """Load a reference image as base64, if it exists."""
     if not ref_id:
         return None
-    path = REFS_DIR / ref_id
-    if not path.exists():
+    import storage as _storage
+    data = _storage.read_file(f"references/{ref_id}")
+    if not data:
         return None
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode()
+    return base64.b64encode(data).decode()
 
 def render_grid_overlay(img: Image.Image) -> Image.Image:
     """Add coordinate numbers to an upscaled image for AI position reference."""
@@ -578,10 +578,11 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
             db2.execute("UPDATE generations SET pixel_data = ?, iterations = ? WHERE id = ?",
                        (json.dumps(pixel_data), step_count[0], generation_id))
 
+            import storage as _storage
             final_img = canvas.to_image()
             filename = f"gen_{generation_id}_{size}x{size}.png"
-            final_img.save(OUTPUT_DIR / filename)
-            upscale_image(final_img, 512).save(OUTPUT_DIR / f"gen_{generation_id}_preview.png")
+            _storage.save_image(final_img, f"output/{filename}")
+            _storage.save_image(upscale_image(final_img, 512), f"output/gen_{generation_id}_preview.png")
 
             db2.execute("UPDATE generations SET status = 'complete', image_path = ? WHERE id = ?",
                        (filename, generation_id))
@@ -721,7 +722,7 @@ def delete_palette(palette_id: int):
 # ── Reference image endpoints ──
 
 @app.post("/api/reference")
-async def generate_reference(data: ReferenceRequest):
+def generate_reference(data: ReferenceRequest):
     """Generate a concept/reference image using image generation model."""
     rd = get_redis()
     if rd:
@@ -764,34 +765,31 @@ async def generate_reference(data: ReferenceRequest):
                 contents=[ref_prompt],
             )
 
+        import storage as _storage
+
+        def _save_ref_part(part):
+            ref_id = f"ref_{int(time.time())}_{hash(data.prompt) & 0xFFFF:04x}.png"
+            try:
+                buf = io.BytesIO()
+                part.as_image().save(buf, format="PNG")
+                _storage.save_file(f"references/{ref_id}", buf.getvalue())
+            except Exception:
+                img_bytes = part.inline_data.data
+                if isinstance(img_bytes, str):
+                    img_bytes = base64.b64decode(img_bytes)
+                _storage.save_file(f"references/{ref_id}", img_bytes)
+            return ref_id
+
         for part in response.parts:
             if part.inline_data is not None:
-                ref_id = f"ref_{int(time.time())}_{hash(data.prompt) & 0xFFFF:04x}.png"
-                # Try as_image first, fall back to raw bytes
-                try:
-                    img = part.as_image()
-                    img.save(REFS_DIR / ref_id)
-                except Exception:
-                    img_bytes = part.inline_data.data
-                    if isinstance(img_bytes, str):
-                        img_bytes = base64.b64decode(img_bytes)
-                    with open(REFS_DIR / ref_id, "wb") as f:
-                        f.write(img_bytes)
-                return {"reference_id": ref_id}
+                return {"reference_id": _save_ref_part(part)}
 
-        # Some models return image as the candidate's content differently
         if hasattr(response, 'candidates') and response.candidates:
             for candidate in response.candidates:
                 if hasattr(candidate, 'content') and candidate.content:
                     for part in candidate.content.parts:
                         if hasattr(part, 'inline_data') and part.inline_data:
-                            ref_id = f"ref_{int(time.time())}_{hash(data.prompt) & 0xFFFF:04x}.png"
-                            img_bytes = part.inline_data.data
-                            if isinstance(img_bytes, str):
-                                img_bytes = base64.b64decode(img_bytes)
-                            with open(REFS_DIR / ref_id, "wb") as f:
-                                f.write(img_bytes)
-                            return {"reference_id": ref_id}
+                            return {"reference_id": _save_ref_part(part)}
 
         return JSONResponse({"error": "No image in response. Model may not support image generation."}, status_code=500)
     except Exception as e:
@@ -833,10 +831,11 @@ async def upload_reference(request: Request):
 
 @app.get("/api/reference/{ref_id}")
 def serve_reference(ref_id: str):
-    path = REFS_DIR / ref_id
-    if not path.exists():
+    import storage
+    data = storage.read_file(f"references/{ref_id}")
+    if not data:
         raise HTTPException(404)
-    return FileResponse(path, media_type="image/png")
+    return Response(content=data, media_type="image/png")
 
 # ── Generation endpoints ──
 
@@ -949,10 +948,11 @@ def manual_pixel_update(gen_id: int, data: ManualPixelUpdate):
             pixel_data[y][x] = c
 
     # Rebuild image
+    import storage as _storage
     img = pixels_to_image(pixel_data, palette, size)
     filename = f"gen_{gen_id}_{size}x{size}.png"
-    img.save(OUTPUT_DIR / filename)
-    upscale_image(img, 512).save(OUTPUT_DIR / f"gen_{gen_id}_preview.png")
+    _storage.save_image(img, f"output/{filename}")
+    _storage.save_image(upscale_image(img, 512), f"output/gen_{gen_id}_preview.png")
 
     db.execute("UPDATE generations SET pixel_data = ? WHERE id = ?",
                (json.dumps(pixel_data), gen_id))
@@ -964,10 +964,11 @@ def manual_pixel_update(gen_id: int, data: ManualPixelUpdate):
 
 @app.get("/api/images/{filename}")
 def serve_image(filename: str):
-    path = OUTPUT_DIR / filename
-    if not path.exists():
+    import storage
+    data = storage.read_file(f"output/{filename}")
+    if not data:
         raise HTTPException(404)
-    return FileResponse(path, media_type="image/png")
+    return Response(content=data, media_type="image/png")
 
 # ── Settings ──
 
@@ -1038,10 +1039,11 @@ def finalize_generation(gen_id: int):
     size = gen["size"]
 
     # Save current state as final
+    import storage as _storage
     final_img = pixels_to_image(pixel_data, palette, size)
     filename = f"gen_{gen_id}_{size}x{size}.png"
-    final_img.save(OUTPUT_DIR / filename)
-    upscale_image(final_img, 512).save(OUTPUT_DIR / f"gen_{gen_id}_preview.png")
+    _storage.save_image(final_img, f"output/{filename}")
+    _storage.save_image(upscale_image(final_img, 512), f"output/gen_{gen_id}_preview.png")
 
     db.execute("UPDATE generations SET status = 'complete', image_path = ? WHERE id = ?",
                (filename, gen_id))

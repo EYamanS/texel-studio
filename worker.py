@@ -11,6 +11,7 @@ Requires REDIS_URL environment variable.
 
 import os
 import sys
+import io
 import json
 import time
 import uuid
@@ -27,9 +28,10 @@ import redis
 from server import (
     sse_event, load_reference_b64, upscale_image, pixels_to_image,
     SPRITE_TYPES, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT,
-    DEFAULT_IMAGE_MODEL, IMAGE_GEN_MODELS, OUTPUT_DIR, REFS_DIR,
+    DEFAULT_IMAGE_MODEL, IMAGE_GEN_MODELS,
     gemini,
 )
+import storage
 from agent import run_agent_stream as agent_run
 from google import genai
 
@@ -111,11 +113,11 @@ def handle_generate(job: dict):
             "notes": "Agent finished", "gen_id": gen_id,
         }))
 
-        # Save image to filesystem (for engine-local serving)
+        # Save image via storage (S3 or local filesystem)
         final_img = canvas.to_image()
         filename = f"gen_{gen_id}_{size}x{size}.png"
-        final_img.save(OUTPUT_DIR / filename)
-        upscale_image(final_img, 512).save(OUTPUT_DIR / f"gen_{gen_id}_preview.png")
+        storage.save_image(final_img, f"output/{filename}")
+        storage.save_image(upscale_image(final_img, 512), f"output/gen_{gen_id}_preview.png")
 
         publish_event(job_id, sse_event("log", {"step": "complete", "message": f"Done in {step_count[0]} steps"}))
         publish_event(job_id, sse_event("complete", {
@@ -163,19 +165,23 @@ def handle_reference(job: dict):
                 contents=[ref_prompt],
             )
 
+        def _save_ref_part(part):
+            rid = f"ref_{int(time.time())}_{hash(prompt) & 0xFFFF:04x}.png"
+            try:
+                buf = io.BytesIO()
+                part.as_image().save(buf, format="PNG")
+                storage.save_file(f"references/{rid}", buf.getvalue())
+            except Exception:
+                img_bytes = part.inline_data.data
+                if isinstance(img_bytes, str):
+                    img_bytes = base64.b64decode(img_bytes)
+                storage.save_file(f"references/{rid}", img_bytes)
+            return rid
+
         ref_id = None
         for part in response.parts:
             if part.inline_data is not None:
-                ref_id = f"ref_{int(time.time())}_{hash(prompt) & 0xFFFF:04x}.png"
-                try:
-                    img = part.as_image()
-                    img.save(REFS_DIR / ref_id)
-                except Exception:
-                    img_bytes = part.inline_data.data
-                    if isinstance(img_bytes, str):
-                        img_bytes = base64.b64decode(img_bytes)
-                    with open(REFS_DIR / ref_id, "wb") as f:
-                        f.write(img_bytes)
+                ref_id = _save_ref_part(part)
                 break
 
         if not ref_id and hasattr(response, 'candidates') and response.candidates:
@@ -183,12 +189,7 @@ def handle_reference(job: dict):
                 if hasattr(candidate, 'content') and candidate.content:
                     for part in candidate.content.parts:
                         if hasattr(part, 'inline_data') and part.inline_data:
-                            ref_id = f"ref_{int(time.time())}_{hash(prompt) & 0xFFFF:04x}.png"
-                            img_bytes = part.inline_data.data
-                            if isinstance(img_bytes, str):
-                                img_bytes = base64.b64decode(img_bytes)
-                            with open(REFS_DIR / ref_id, "wb") as f:
-                                f.write(img_bytes)
+                            ref_id = _save_ref_part(part)
                             break
 
         if ref_id:
