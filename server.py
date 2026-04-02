@@ -119,6 +119,11 @@ def gemini():
 
 # ── Database ──
 
+def _has_column(conn, table: str, column: str) -> bool:
+    """Check if a column exists in a SQLite table."""
+    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(c[1] == column for c in cols)
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
@@ -156,6 +161,15 @@ def init_db():
             FOREIGN KEY (generation_id) REFERENCES generations(id)
         )
     """)
+
+    # Auto-migrate: add columns that may be missing from older DBs
+    if not _has_column(conn, "generations", "colors"):
+        conn.execute("ALTER TABLE generations ADD COLUMN colors TEXT")
+    if not _has_column(conn, "generations", "sprite_type"):
+        conn.execute("ALTER TABLE generations ADD COLUMN sprite_type TEXT DEFAULT 'block'")
+    if not _has_column(conn, "generations", "reference_id"):
+        conn.execute("ALTER TABLE generations ADD COLUMN reference_id TEXT")
+
     # Insert default palette if none exist
     if conn.execute("SELECT COUNT(*) FROM palettes").fetchone()[0] == 0:
         conn.execute(
@@ -429,6 +443,50 @@ Think carefully about each pixel. This is {size}x{size} — every pixel matters.
 def sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
+# ── Redis (optional — for queue-based worker mode) ──
+
+REDIS_URL = os.getenv("REDIS_URL")
+_redis = None
+
+def get_redis():
+    global _redis
+    if _redis is None and REDIS_URL:
+        import redis as _redis_mod
+        _redis = _redis_mod.from_url(REDIS_URL, decode_responses=True)
+    return _redis
+
+def _sse_from_redis(job_id: str):
+    """Subscribe to a Redis pub/sub channel and yield SSE events."""
+    import redis as _redis_mod
+    sub = _redis_mod.from_url(REDIS_URL, decode_responses=True).pubsub()
+    sub.subscribe(f"texel:events:{job_id}")
+    try:
+        for msg in sub.listen():
+            if msg["type"] != "message":
+                continue
+            data = msg["data"]
+            if data == "__done__":
+                break
+            yield data
+    finally:
+        sub.unsubscribe()
+        sub.close()
+
+def _wait_for_redis_result(job_id: str, timeout: int = 120):
+    """Subscribe to a Redis result channel and wait for a single response."""
+    import redis as _redis_mod
+    sub = _redis_mod.from_url(REDIS_URL, decode_responses=True).pubsub()
+    sub.subscribe(f"texel:result:{job_id}")
+    try:
+        for msg in sub.listen():
+            if msg["type"] != "message":
+                continue
+            return json.loads(msg["data"])
+    finally:
+        sub.unsubscribe()
+        sub.close()
+    return {"error": "Timed out"}
+
 def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = False, colors: list[str] | None = None):
     """Shared SSE generator for initial generation and chat continuation."""
     import threading
@@ -654,6 +712,23 @@ def delete_palette(palette_id: int):
 @app.post("/api/reference")
 async def generate_reference(data: ReferenceRequest):
     """Generate a concept/reference image using image generation model."""
+    rd = get_redis()
+    if rd:
+        import uuid as _uuid
+        job_id = str(_uuid.uuid4())
+        rd.lpush("texel:jobs", json.dumps({
+            "type": "reference",
+            "job_id": job_id,
+            "prompt": data.prompt,
+            "feedback": data.feedback,
+            "model": data.model,
+            "sprite_type": data.sprite_type,
+        }))
+        result = _wait_for_redis_result(job_id)
+        if "error" in result:
+            return JSONResponse(result, status_code=500)
+        return result
+
     try:
         type_config = SPRITE_TYPES.get(data.sprite_type, SPRITE_TYPES["block"])
         ref_prompt = f"{data.prompt}\n\n{type_config['ref_prompt']}"
@@ -800,6 +875,8 @@ def get_generation(gen_id: int):
 async def start_generation(data: GenerateRequest):
     if data.size not in (8, 16, 32, 64):
         raise HTTPException(400, "Size must be 8, 16, 32, or 64")
+    if not data.colors:
+        raise HTTPException(400, "Colors array is required")
 
     db = get_db()
     model = data.model if data.model in GEMINI_MODELS else DEFAULT_MODEL
@@ -811,6 +888,25 @@ async def start_generation(data: GenerateRequest):
     db.commit()
     db.close()
 
+    rd = get_redis()
+    if rd:
+        import uuid as _uuid
+        job_id = str(_uuid.uuid4())
+        rd.lpush("texel:jobs", json.dumps({
+            "type": "generate",
+            "job_id": job_id,
+            "gen_id": gen_id,
+            "message": data.prompt,
+            "colors": data.colors,
+            "is_continuation": False,
+        }))
+        return StreamingResponse(
+            _sse_from_redis(job_id),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Fallback: in-memory (no Redis, self-hosted)
     return StreamingResponse(
         _run_agent_sse(gen_id, data.prompt, colors=data.colors),
         media_type="text/event-stream",
@@ -869,6 +965,32 @@ async def chat_with_agent(data: ChatRequest):
     db.close()
     if not gen:
         raise HTTPException(404)
+
+    rd = get_redis()
+    if rd:
+        import uuid as _uuid
+        job_id = str(_uuid.uuid4())
+
+        # Route to the worker that owns this session
+        worker_id = rd.get(f"texel:sessions:{data.generation_id}")
+        queue_name = f"texel:jobs:{worker_id}" if worker_id else "texel:jobs"
+
+        # Get colors from the generation
+        colors = json.loads(gen["colors"]) if gen["colors"] else ["#c8a44e"]
+
+        rd.lpush(queue_name, json.dumps({
+            "type": "chat",
+            "job_id": job_id,
+            "gen_id": data.generation_id,
+            "message": data.message,
+            "colors": colors,
+            "is_continuation": True,
+        }))
+        return StreamingResponse(
+            _sse_from_redis(job_id),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     return StreamingResponse(
         _run_agent_sse(data.generation_id, data.message, is_continuation=True),

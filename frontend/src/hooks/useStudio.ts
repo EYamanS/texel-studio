@@ -125,6 +125,11 @@ export function useStudio() {
     spriteType: string;
     systemPrompt?: string;
   }) => {
+    if (!currentPalette?.colors?.length) {
+      setStatus({ type: "error", message: "No palette selected" });
+      return;
+    }
+
     setSpriteSize(opts.size);
     setPixelData(Array.from({ length: opts.size }, () => Array(opts.size).fill(-1)));
     setLogs([]);

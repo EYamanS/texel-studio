@@ -71,21 +71,15 @@ Diffusion models hallucinate pixels. This tool places them.
 git clone https://github.com/EYamanS/texel-studio.git
 cd texel-studio
 
-# Backend
+# Quick start (handles everything)
+./start.sh
+
+# Or set up manually:
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-
-cp .env.example .env
-# Edit .env with your API key(s)
-
-# Frontend (build once)
-cd frontend
-npm install
-npm run build
-cd ..
-
-# Run
+cp .env.example .env       # edit with your API key(s)
+cd frontend && npm install && npm run build && cd ..
 python server.py
 ```
 
@@ -118,11 +112,28 @@ Output: `BlockName_00.png` through `BlockName_15.png`
 
 A hosted version with authentication, credit-based billing, and a shared gallery is available at [texel.studio](https://texel.studio).
 
+## Scaling (Optional)
+
+For concurrent generation support, add Redis:
+
+```bash
+# Set Redis URL in .env
+REDIS_URL=redis://localhost:6379
+
+# Run both the API server and worker(s)
+python server.py &
+python worker.py &
+python worker.py &  # add more workers for more parallelism
+```
+
+Without Redis, the engine handles one generation at a time — fine for personal use.
+
 ## Tech Stack
 
 - **Backend**: Python, FastAPI, LangGraph, LangChain
 - **AI**: Google Gemini + OpenAI (pluggable)
 - **Frontend**: Next.js (static export to `static/`)
+- **Queue**: Redis (optional, for concurrent generations)
 - **Tracing**: LangSmith (optional)
 
 ## License

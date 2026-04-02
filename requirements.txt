@@ -8,3 +8,4 @@ langchain>=1.0.0
 langchain-google-genai>=4.0.0
 langgraph>=1.0.0
 langsmith>=0.7.0
+redis>=5.0.0
