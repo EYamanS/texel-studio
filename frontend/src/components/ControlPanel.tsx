@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { referenceUrl } from "@/lib/api";
 
 export function ControlPanel({ studio }: { studio: any }) {
@@ -40,14 +41,20 @@ export function ControlPanel({ studio }: { studio: any }) {
         refModelRef.current?.value || s.default_image_model,
         typeRef.current?.value || "block"
       );
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) {
+      alert(e.message);
+    }
     setIsGenRef(false);
   };
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    try { await studio.uploadReference(file); } catch (err: any) { alert(err.message); }
+    try {
+      await studio.uploadReference(file);
+    } catch (err: any) {
+      alert(err.message);
+    }
     e.target.value = "";
   };
 
@@ -61,15 +68,24 @@ export function ControlPanel({ studio }: { studio: any }) {
         refModelRef.current?.value || s.default_image_model,
         typeRef.current?.value || "block"
       );
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) {
+      alert(e.message);
+    }
   };
 
   return (
-    <div className="w-[280px] shrink-0 border-r overflow-y-auto" style={{ borderColor: "var(--border)" }}>
-      <div className="p-3 space-y-4">
+    <div className="w-[280px] shrink-0 flex flex-col h-screen overflow-hidden" style={{ borderRight: "1px solid var(--border)" }}>
+
+      {/* Header */}
+      <div className="px-3.5 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid var(--border)" }}>
+        <div style={{ width: 6, height: 6, background: "var(--accent)", transform: "rotate(45deg)" }} />
+        <span style={{ fontSize: "11px", fontWeight: 600, letterSpacing: "0.05em" }}>PIXEL STUDIO</span>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
 
         {/* ── Palette ── */}
-        <section>
+        <div className="panel-section">
           <div className="label">Palette</div>
           <select
             value={studio.currentPalette?.id || ""}
@@ -81,16 +97,22 @@ export function ControlPanel({ studio }: { studio: any }) {
           </select>
 
           {/* Swatches */}
-          <div className="flex flex-wrap gap-px mt-2">
+          <div className="flex flex-wrap gap-[2px] mt-2.5">
             {studio.currentPalette?.colors.map((c: string, i: number) => (
-              <button
+              <motion.button
                 key={i}
-                className="w-[22px] h-[22px] relative transition-transform hover:scale-110"
+                whileHover={{ scale: 1.15 }}
+                whileTap={{ scale: 0.95 }}
+                className="relative"
                 style={{
+                  width: 22,
+                  height: 22,
                   background: c,
+                  border: "none",
+                  cursor: "pointer",
                   outline: i === studio.selectedColorIdx ? "2px solid var(--accent)" : "1px solid var(--border)",
                   outlineOffset: i === studio.selectedColorIdx ? "1px" : "0",
-                  zIndex: i === studio.selectedColorIdx ? 1 : 0,
+                  zIndex: i === studio.selectedColorIdx ? 2 : 1,
                 }}
                 onClick={() => studio.setSelectedColorIdx(i)}
                 title={`${i}: ${c}`}
@@ -100,30 +122,65 @@ export function ControlPanel({ studio }: { studio: any }) {
 
           {/* Add color */}
           <div className="flex gap-1 mt-2">
-            <input type="color" value={addHex} onChange={(e) => setAddHex(e.target.value)}
-              className="w-7 h-7 p-0 border cursor-pointer" style={{ borderColor: "var(--border)", background: "transparent" }} />
-            <input type="text" value={addHex} onChange={(e) => setAddHex(e.target.value)} maxLength={7}
-              className="flex-1" style={{ fontSize: "10px" }} />
+            <input
+              type="color"
+              value={addHex}
+              onChange={(e) => setAddHex(e.target.value)}
+              style={{
+                width: 28,
+                height: 28,
+                padding: 0,
+                border: "1px solid var(--border)",
+                background: "transparent",
+                cursor: "pointer",
+                borderRadius: 0,
+              }}
+            />
+            <input
+              type="text"
+              value={addHex}
+              onChange={(e) => setAddHex(e.target.value)}
+              maxLength={7}
+              style={{ fontSize: "10px", flex: 1 }}
+            />
             <button className="btn" onClick={() => studio.addColor(addHex)}>+</button>
           </div>
 
-          {/* Save as */}
-          <div className="flex gap-1 mt-1">
-            <input type="text" value={palName} onChange={(e) => setPalName(e.target.value)} placeholder="Save as..." />
-            <button className="btn" onClick={() => { studio.savePaletteAs(palName); setPalName(""); }}>Save</button>
+          {/* Save palette as */}
+          <div className="flex gap-1 mt-1.5">
+            <input
+              type="text"
+              value={palName}
+              onChange={(e) => setPalName(e.target.value)}
+              placeholder="save palette as..."
+              style={{ fontSize: "10px" }}
+            />
+            <button
+              className="btn"
+              onClick={() => {
+                if (palName.trim()) {
+                  studio.savePaletteAs(palName.trim());
+                  setPalName("");
+                }
+              }}
+            >
+              save
+            </button>
           </div>
-        </section>
-
-        <hr style={{ border: "none", borderTop: "1px solid var(--border)" }} />
+        </div>
 
         {/* ── Prompt & Settings ── */}
-        <section>
+        <div className="panel-section">
           <div className="label">Generate</div>
-          <textarea ref={promptRef} placeholder="A dirt block with embedded pebbles and thin root fragments..." rows={4} />
+          <textarea
+            ref={promptRef}
+            placeholder="a dirt block with embedded pebbles and thin root fragments..."
+            rows={4}
+          />
 
-          <div className="grid grid-cols-2 gap-1 mt-2">
+          <div className="grid grid-cols-2 gap-1.5 mt-2.5">
             <div>
-              <div style={{ fontSize: "9px", color: "var(--text-faint)", marginBottom: 2 }}>type</div>
+              <div style={{ fontSize: "9px", color: "var(--text-faint)", marginBottom: 3 }}>type</div>
               <select ref={typeRef} defaultValue="block">
                 {Object.entries(s.sprite_types || {}).map(([k, v]: [string, any]) => (
                   <option key={k} value={k}>{v.label}</option>
@@ -131,32 +188,44 @@ export function ControlPanel({ studio }: { studio: any }) {
               </select>
             </div>
             <div>
-              <div style={{ fontSize: "9px", color: "var(--text-faint)", marginBottom: 2 }}>size</div>
+              <div style={{ fontSize: "9px", color: "var(--text-faint)", marginBottom: 3 }}>size</div>
               <select ref={sizeRef} defaultValue="16">
-                {[8, 16, 32, 64].map(n => <option key={n} value={n}>{n}x{n}</option>)}
+                {[8, 16, 32, 64].map((n) => (
+                  <option key={n} value={n}>{n}x{n}</option>
+                ))}
               </select>
             </div>
           </div>
 
-          <div style={{ fontSize: "9px", color: "var(--text-faint)", marginBottom: 2, marginTop: 6 }}>model</div>
+          <div style={{ fontSize: "9px", color: "var(--text-faint)", marginBottom: 3, marginTop: 8 }}>model</div>
           <select ref={modelRef} defaultValue={s.default_model}>
-            {s.models.map((m: string) => <option key={m} value={m}>{m}</option>)}
+            {s.models.map((m: string) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
           </select>
 
-          <details className="mt-2" style={{ color: "var(--text-dim)", fontSize: "10px" }}>
-            <summary className="cursor-pointer hover:text-[var(--text)]">system prompt</summary>
-            <textarea ref={sysRef} defaultValue={s.system_prompt} rows={3} className="mt-1" style={{ fontSize: "10px", minHeight: 40 }} />
+          <details className="mt-2.5" style={{ color: "var(--text-dim)", fontSize: "10px" }}>
+            <summary className="cursor-pointer select-none" style={{ transition: "color 0.15s" }}>
+              system prompt
+            </summary>
+            <textarea
+              ref={sysRef}
+              defaultValue={s.system_prompt}
+              rows={3}
+              className="mt-1.5"
+              style={{ fontSize: "10px", minHeight: 40 }}
+            />
           </details>
-        </section>
-
-        <hr style={{ border: "none", borderTop: "1px solid var(--border)" }} />
+        </div>
 
         {/* ── Reference Image ── */}
-        <section>
-          <div className="label">Reference (optional)</div>
-          <div style={{ fontSize: "9px", color: "var(--text-faint)", marginBottom: 2 }}>concept model</div>
+        <div className="panel-section">
+          <div className="label">Reference</div>
+          <div style={{ fontSize: "9px", color: "var(--text-faint)", marginBottom: 3 }}>concept model</div>
           <select ref={refModelRef} defaultValue={s.default_image_model}>
-            {s.image_models.map((m: string) => <option key={m} value={m}>{m}</option>)}
+            {s.image_models.map((m: string) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
           </select>
 
           <div className="flex gap-1 mt-2">
@@ -167,48 +236,82 @@ export function ControlPanel({ studio }: { studio: any }) {
             <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleUpload} />
           </div>
 
-          {/* Preview */}
-          {studio.referenceId && (
-            <div className="mt-2">
-              <img src={referenceUrl(studio.referenceId)} alt="ref" className="w-full" style={{ border: "1px solid var(--border)" }} />
-              <div className="flex gap-1 mt-1">
-                <button
-                  className={`btn flex-1 ${studio.refConfirmed ? "btn-primary" : ""}`}
-                  onClick={studio.confirmReference}
-                >
-                  {studio.refConfirmed ? "confirmed" : "confirm"}
-                </button>
-                <button className="btn flex-1" onClick={handleRevise}>revise</button>
-                <button className="btn btn-danger" onClick={studio.clearReference}>x</button>
-              </div>
-            </div>
-          )}
-        </section>
+          {/* Reference preview */}
+          <AnimatePresence>
+            {studio.referenceId && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                className="mt-2 overflow-hidden"
+              >
+                <img
+                  src={referenceUrl(studio.referenceId)}
+                  alt="reference"
+                  className="w-full"
+                  style={{ border: "1px solid var(--border)", display: "block" }}
+                />
+                <div className="flex gap-1 mt-1.5">
+                  <button
+                    className={`btn flex-1 ${studio.refConfirmed ? "btn-primary" : ""}`}
+                    onClick={studio.confirmReference}
+                  >
+                    {studio.refConfirmed ? "confirmed" : "confirm"}
+                  </button>
+                  <button className="btn flex-1" onClick={handleRevise}>revise</button>
+                  <button className="btn btn-danger" onClick={studio.clearReference}>x</button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
 
-        <hr style={{ border: "none", borderTop: "1px solid var(--border)" }} />
-
-        {/* ── Generate Button ── */}
+      {/* ── Bottom: Generate Button ── */}
+      <div className="p-3" style={{ borderTop: "1px solid var(--border)" }}>
         <div className="flex gap-1">
-          <button className="btn btn-primary flex-1" onClick={handleGenerate} disabled={studio.isGenerating}>
+          <button
+            className="btn btn-primary flex-1"
+            onClick={handleGenerate}
+            disabled={studio.isGenerating}
+          >
             {studio.isGenerating ? "painting..." : "generate sprite"}
           </button>
           {studio.isGenerating && (
-            <button className="btn" onClick={studio.skipAndFinalize}>skip</button>
+            <motion.button
+              initial={{ opacity: 0, width: 0 }}
+              animate={{ opacity: 1, width: "auto" }}
+              className="btn"
+              onClick={studio.skipAndFinalize}
+            >
+              skip
+            </motion.button>
           )}
         </div>
 
         {/* Status */}
-        {studio.status.message && (
-          <div style={{
-            fontSize: "10px",
-            color: studio.status.type === "generating" ? "var(--accent)" :
-                   studio.status.type === "complete" ? "var(--success)" :
-                   studio.status.type === "error" ? "var(--danger)" : "var(--text-dim)",
-            wordBreak: "break-word",
-          }}>
-            {studio.status.message}
-          </div>
-        )}
+        <AnimatePresence>
+          {studio.status.message && (
+            <motion.div
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              style={{
+                fontSize: "10px",
+                marginTop: 6,
+                wordBreak: "break-word",
+                lineHeight: 1.4,
+                color:
+                  studio.status.type === "generating" ? "var(--accent)" :
+                  studio.status.type === "complete" ? "var(--success)" :
+                  studio.status.type === "error" ? "var(--danger)" :
+                  "var(--text-dim)",
+              }}
+            >
+              {studio.status.message}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </div>
   );

@@ -71,6 +71,7 @@ Diffusion models hallucinate pixels. This tool places them.
 git clone https://github.com/EYamanS/pixel-studio.git
 cd pixel-studio
 
+# Backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -78,6 +79,13 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with your API key(s)
 
+# Frontend (build once)
+cd frontend
+npm install
+npm run build
+cd ..
+
+# Run
 python server.py
 ```
 
@@ -110,7 +118,7 @@ Output: `BlockName_00.png` through `BlockName_15.png`
 
 - **Backend**: Python, FastAPI, LangGraph, LangChain
 - **AI**: Google Gemini + OpenAI (pluggable)
-- **Frontend**: Vanilla HTML/CSS/JS (single file, no build step)
+- **Frontend**: Next.js (static export to `static/`)
 - **Tracing**: LangSmith (optional)
 
 ## License

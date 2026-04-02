@@ -554,6 +554,15 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
 
 app = FastAPI(title="Pixel Studio")
 
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # API models
 class PaletteCreate(BaseModel):
     name: str
