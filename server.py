@@ -898,6 +898,11 @@ async def start_generation(data: GenerateRequest):
             "gen_id": gen_id,
             "message": data.prompt,
             "colors": data.colors,
+            "size": data.size,
+            "model": model,
+            "sprite_type": data.sprite_type,
+            "system_prompt": data.system_prompt,
+            "reference_id": data.reference_id,
             "is_continuation": False,
         }))
         return StreamingResponse(
@@ -978,12 +983,18 @@ async def chat_with_agent(data: ChatRequest):
         # Get colors from the generation
         colors = json.loads(gen["colors"]) if gen["colors"] else ["#c8a44e"]
 
+        pixel_data = json.loads(gen["pixel_data"]) if gen["pixel_data"] else None
         rd.lpush(queue_name, json.dumps({
             "type": "chat",
             "job_id": job_id,
             "gen_id": data.generation_id,
             "message": data.message,
             "colors": colors,
+            "size": gen["size"],
+            "model": gen["model"],
+            "sprite_type": gen["sprite_type"] or "block",
+            "system_prompt": gen["system_prompt"],
+            "pixel_data": pixel_data,
             "is_continuation": True,
         }))
         return StreamingResponse(
