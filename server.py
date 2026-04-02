@@ -563,6 +563,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Optional API key auth — set API_KEY env var to enable
+_API_KEY = os.getenv("API_KEY")
+
+if _API_KEY:
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import JSONResponse
+
+    class ApiKeyMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            # Skip auth for health check
+            if request.url.path == "/health":
+                return await call_next(request)
+            key = request.headers.get("x-api-key") or request.query_params.get("api_key")
+            if key != _API_KEY:
+                return JSONResponse({"error": "Invalid or missing API key"}, status_code=401)
+            return await call_next(request)
+
+    app.add_middleware(ApiKeyMiddleware)
+
 # API models
 class PaletteCreate(BaseModel):
     name: str
@@ -953,6 +972,10 @@ def get_tileset_preview(name: str):
         raise HTTPException(404)
     files = sorted([f.name for f in tileset_dir.glob("*.png")])
     return {"name": name, "files": files}
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 @app.get("/api/settings")
 def get_settings():
