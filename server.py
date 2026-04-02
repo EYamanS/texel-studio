@@ -134,7 +134,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             prompt TEXT NOT NULL,
             system_prompt TEXT,
-            palette_id INTEGER,
+            colors TEXT,
             size INTEGER NOT NULL,
             model TEXT,
             reference_id TEXT,
@@ -143,8 +143,7 @@ def init_db():
             iterations INTEGER DEFAULT 0,
             status TEXT DEFAULT 'pending',
             image_path TEXT,
-            created_at REAL DEFAULT (unixepoch()),
-            FOREIGN KEY (palette_id) REFERENCES palettes(id)
+            created_at REAL DEFAULT (unixepoch())
         )
     """)
     conn.execute("""
@@ -442,13 +441,7 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
         yield sse_event("error", {"message": "Generation not found"})
         return
 
-    if colors:
-        palette = colors
-    elif gen["palette_id"]:
-        palette_row = db.execute("SELECT colors FROM palettes WHERE id = ?", (gen["palette_id"],)).fetchone()
-        palette = json.loads(palette_row["colors"]) if palette_row else ["#c8a44e"]
-    else:
-        palette = ["#c8a44e"]
+    palette = colors if colors else ["#c8a44e"]
     size = gen["size"]
     model = gen["model"] or DEFAULT_MODEL
     sprite_type = gen["sprite_type"] or "block"
@@ -604,8 +597,7 @@ class ReferenceRequest(BaseModel):
 
 class GenerateRequest(BaseModel):
     prompt: str
-    palette_id: Optional[int] = None
-    colors: Optional[list[str]] = None  # Pass colors directly (cloud mode)
+    colors: list[str]
     size: int = 16
     system_prompt: Optional[str] = None
     model: Optional[str] = None
@@ -765,10 +757,8 @@ def serve_reference(ref_id: str):
 def list_generations():
     db = get_db()
     rows = db.execute("""
-        SELECT g.*, p.name as palette_name
-        FROM generations g
-        LEFT JOIN palettes p ON g.palette_id = p.id
-        ORDER BY g.created_at DESC
+        SELECT * FROM generations
+        ORDER BY created_at DESC
         LIMIT 50
     """).fetchall()
     db.close()
@@ -798,16 +788,11 @@ def get_generation(gen_id: int):
         raise HTTPException(404)
     logs = db.execute("SELECT * FROM generation_logs WHERE generation_id = ? ORDER BY created_at",
                       (gen_id,)).fetchall()
-    palette = None
-    if gen["palette_id"]:
-        p = db.execute("SELECT colors FROM palettes WHERE id = ?", (gen["palette_id"],)).fetchone()
-        if p:
-            palette = json.loads(p["colors"])
     db.close()
     return {
         **dict(gen),
         "pixel_data": json.loads(gen["pixel_data"]) if gen["pixel_data"] else None,
-        "palette": palette,
+        "colors": json.loads(gen["colors"]) if gen["colors"] else None,
         "logs": [dict(l) for l in logs],
     }
 
@@ -819,14 +804,12 @@ async def start_generation(data: GenerateRequest):
     db = get_db()
     model = data.model if data.model in GEMINI_MODELS else DEFAULT_MODEL
     cur = db.execute(
-        "INSERT INTO generations (prompt, system_prompt, palette_id, size, model, reference_id, sprite_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (data.prompt, data.system_prompt, data.palette_id, data.size, model, data.reference_id, data.sprite_type),
+        "INSERT INTO generations (prompt, system_prompt, colors, size, model, reference_id, sprite_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (data.prompt, data.system_prompt, json.dumps(data.colors), data.size, model, data.reference_id, data.sprite_type),
     )
     gen_id = cur.lastrowid
     db.commit()
     db.close()
-
-    # Reference image is optional
 
     return StreamingResponse(
         _run_agent_sse(gen_id, data.prompt, colors=data.colors),
@@ -842,8 +825,7 @@ def manual_pixel_update(gen_id: int, data: ManualPixelUpdate):
         raise HTTPException(404)
 
     pixel_data = json.loads(gen["pixel_data"])
-    palette_row = db.execute("SELECT colors FROM palettes WHERE id = ?", (gen["palette_id"],)).fetchone()
-    palette = json.loads(palette_row["colors"])
+    palette = json.loads(gen["colors"]) if gen["colors"] else ["#c8a44e"]
     size = gen["size"]
 
     for u in data.updates:
@@ -903,8 +885,7 @@ def finalize_generation(gen_id: int):
     if not gen or not gen["pixel_data"]:
         raise HTTPException(404)
 
-    palette_row = db.execute("SELECT colors FROM palettes WHERE id = ?", (gen["palette_id"],)).fetchone()
-    palette = json.loads(palette_row["colors"])
+    palette = json.loads(gen["colors"]) if gen["colors"] else ["#c8a44e"]
     pixel_data = json.loads(gen["pixel_data"])
     size = gen["size"]
 
@@ -935,8 +916,7 @@ def generate_tileset_endpoint(data: TilesetRequest):
     if not gen or not gen["pixel_data"]:
         raise HTTPException(404, "Generation not found or has no pixel data")
 
-    palette_row = db.execute("SELECT colors FROM palettes WHERE id = ?", (gen["palette_id"],)).fetchone()
-    palette = json.loads(palette_row["colors"])
+    palette = json.loads(gen["colors"]) if gen["colors"] else ["#c8a44e"]
     pixel_data = json.loads(gen["pixel_data"])
     size = gen["size"]
     db.close()

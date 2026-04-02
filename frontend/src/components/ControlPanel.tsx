@@ -23,7 +23,6 @@ export function ControlPanel({ studio }: { studio: any }) {
     if (!prompt || !studio.currentPalette) return;
     await studio.generate({
       prompt,
-      paletteId: studio.currentPalette.id,
       size: parseInt(sizeRef.current?.value || "16"),
       model: modelRef.current?.value || s.default_model,
       spriteType: typeRef.current?.value || "block",

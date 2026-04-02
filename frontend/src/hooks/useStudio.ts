@@ -120,7 +120,6 @@ export function useStudio() {
   // ── Generation (SSE) ──
   const generate = useCallback(async (opts: {
     prompt: string;
-    paletteId: number;
     size: number;
     model: string;
     spriteType: string;
@@ -141,7 +140,7 @@ export function useStudio() {
         signal: abortRef.current.signal,
         body: JSON.stringify({
           prompt: opts.prompt,
-          palette_id: opts.paletteId,
+          colors: currentPalette?.colors || [],
           size: opts.size,
           system_prompt: opts.systemPrompt || null,
           model: opts.model,
