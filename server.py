@@ -971,4 +971,5 @@ app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8500, reload=True)
+    port = int(os.getenv("PORT", "8500"))
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=os.getenv("RAILWAY_ENVIRONMENT") is None)
