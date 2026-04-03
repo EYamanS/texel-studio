@@ -7,6 +7,10 @@ import { api, tilesetUrl } from "@/lib/api";
 export function Canvas({ studio }: { studio: any }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const prevPixelsRef = useRef<number[][] | null>(null);
+  const prevSizeRef = useRef<number>(0);
+  const prevPaletteRef = useRef<string[] | null>(null);
+  const rafRef = useRef<number>(0);
   const [pixelInfo, setPixelInfo] = useState("");
   const [isPainting, setIsPainting] = useState(false);
   const [chatMsg, setChatMsg] = useState("");
@@ -34,27 +38,22 @@ export function Canvas({ studio }: { studio: any }) {
     return () => window.removeEventListener("resize", resize);
   }, [spriteSize]);
 
-  // Render pixels
-  useEffect(() => {
+  // Full canvas redraw
+  const drawFull = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || !pixelData || !currentPalette) return;
     const ctx = canvas.getContext("2d")!;
     ctx.imageSmoothingEnabled = false;
-
     const scale = Math.floor(canvasDisplaySize / spriteSize);
     canvas.width = spriteSize * scale;
     canvas.height = spriteSize * scale;
 
-    // Checkerboard background
-    for (let y = 0; y < spriteSize; y++) {
+    for (let y = 0; y < spriteSize; y++)
       for (let x = 0; x < spriteSize; x++) {
         ctx.fillStyle = (x + y) % 2 === 0 ? "#18160f" : "#13110c";
         ctx.fillRect(x * scale, y * scale, scale, scale);
       }
-    }
-
-    // Draw pixels
-    for (let y = 0; y < pixelData.length; y++) {
+    for (let y = 0; y < pixelData.length; y++)
       for (let x = 0; x < (pixelData[y]?.length || 0); x++) {
         const idx = pixelData[y][x];
         if (idx >= 0 && idx < currentPalette.colors.length) {
@@ -62,24 +61,55 @@ export function Canvas({ studio }: { studio: any }) {
           ctx.fillRect(x * scale, y * scale, scale, scale);
         }
       }
-    }
-
-    // Grid lines (only visible when zoomed in enough)
     if (scale > 6) {
       ctx.strokeStyle = "rgba(255,255,255,0.03)";
-      ctx.lineWidth = 1;
       for (let i = 0; i <= spriteSize; i++) {
-        ctx.beginPath();
-        ctx.moveTo(i * scale + 0.5, 0);
-        ctx.lineTo(i * scale + 0.5, canvas.height);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(0, i * scale + 0.5);
-        ctx.lineTo(canvas.width, i * scale + 0.5);
-        ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(i * scale + 0.5, 0); ctx.lineTo(i * scale + 0.5, canvas.height); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, i * scale + 0.5); ctx.lineTo(canvas.width, i * scale + 0.5); ctx.stroke();
       }
     }
+    prevPixelsRef.current = pixelData.map((row: number[]) => [...row]);
+    prevSizeRef.current = spriteSize;
+    prevPaletteRef.current = [...currentPalette.colors];
   }, [pixelData, spriteSize, currentPalette, canvasDisplaySize]);
+
+  // Diff-only pixel update
+  const drawDiff = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !pixelData || !currentPalette || !prevPixelsRef.current) return;
+    const ctx = canvas.getContext("2d")!;
+    const scale = Math.floor(canvasDisplaySize / spriteSize);
+
+    for (let y = 0; y < pixelData.length; y++)
+      for (let x = 0; x < (pixelData[y]?.length || 0); x++) {
+        const newIdx = pixelData[y][x];
+        const oldIdx = prevPixelsRef.current[y]?.[x] ?? -1;
+        if (newIdx !== oldIdx) {
+          ctx.fillStyle = (x + y) % 2 === 0 ? "#18160f" : "#13110c";
+          ctx.fillRect(x * scale, y * scale, scale, scale);
+          if (newIdx >= 0 && newIdx < currentPalette.colors.length) {
+            ctx.fillStyle = currentPalette.colors[newIdx];
+            ctx.fillRect(x * scale, y * scale, scale, scale);
+          }
+        }
+      }
+    prevPixelsRef.current = pixelData.map((row: number[]) => [...row]);
+  }, [pixelData, spriteSize, currentPalette, canvasDisplaySize]);
+
+  // Render — decides between full and diff
+  useEffect(() => {
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      const needsFull =
+        !prevPixelsRef.current ||
+        prevSizeRef.current !== spriteSize ||
+        !prevPaletteRef.current ||
+        prevPaletteRef.current.length !== currentPalette?.colors?.length ||
+        prevPaletteRef.current.some((c: string, i: number) => c !== currentPalette?.colors[i]);
+      if (needsFull) drawFull(); else drawDiff();
+    });
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [pixelData, spriteSize, currentPalette, canvasDisplaySize, drawFull, drawDiff]);
 
   // Get pixel coordinates from mouse event
   const getPixel = useCallback((e: React.MouseEvent) => {
