@@ -187,7 +187,7 @@ export function useStudio() {
     }
     setIsGenerating(false);
     abortRef.current = null;
-  }, [refConfirmed, referenceId, loadHistory]);
+  }, [refConfirmed, referenceId, currentPalette, loadHistory]);
 
   const handleSSE = useCallback((event: string, data: any) => {
     switch (event) {

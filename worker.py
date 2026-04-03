@@ -36,6 +36,8 @@ from agent import run_agent_stream as agent_run
 from google import genai
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+CLOUD_WEBHOOK_URL = os.getenv("CLOUD_WEBHOOK_URL")
+CLOUD_API_KEY = os.getenv("API_KEY", "")
 WORKER_ID = f"worker-{uuid.uuid4().hex[:8]}"
 
 r = redis.from_url(REDIS_URL, decode_responses=True)
@@ -127,10 +129,55 @@ def handle_generate(job: dict):
         # Register this worker as owner of the session (for chat routing)
         r.set(f"texel:sessions:{gen_id}", WORKER_ID, ex=3600)
 
+        # Notify cloud webhook (persists result to Supabase regardless of client connection)
+        external_id = job.get("external_id")
+        if CLOUD_WEBHOOK_URL and external_id:
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    CLOUD_WEBHOOK_URL,
+                    data=json.dumps({
+                        "external_id": external_id,
+                        "pixel_data": pixel_data,
+                        "image_path": filename,
+                        "iterations": step_count[0],
+                        "status": "completed",
+                    }).encode(),
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-api-key": CLOUD_API_KEY,
+                    },
+                )
+                urllib.request.urlopen(req, timeout=30)
+                print(f"[{WORKER_ID}] Webhook OK for {external_id}")
+            except Exception as we:
+                print(f"[{WORKER_ID}] Webhook failed for {external_id}: {we}")
+
     except Exception as e:
         import traceback
         traceback.print_exc()
         publish_event(job_id, sse_event("error", {"message": str(e)}))
+
+        # Notify cloud webhook of error too
+        external_id = job.get("external_id")
+        if CLOUD_WEBHOOK_URL and external_id:
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    CLOUD_WEBHOOK_URL,
+                    data=json.dumps({
+                        "external_id": external_id,
+                        "status": "error",
+                        "error_message": str(e),
+                    }).encode(),
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-api-key": CLOUD_API_KEY,
+                    },
+                )
+                urllib.request.urlopen(req, timeout=10)
+            except Exception:
+                pass
     finally:
         publish_event(job_id, "__done__")
 

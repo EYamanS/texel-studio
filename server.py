@@ -673,6 +673,7 @@ class GenerateRequest(BaseModel):
     model: Optional[str] = None
     reference_id: Optional[str] = None
     sprite_type: str = "block"
+    external_id: Optional[str] = None  # Optional tracking ID (forwarded to worker webhook)
 
 class ManualPixelUpdate(BaseModel):
     generation_id: int
@@ -916,6 +917,7 @@ async def start_generation(data: GenerateRequest):
             "sprite_type": data.sprite_type,
             "system_prompt": data.system_prompt,
             "reference_id": data.reference_id,
+            "external_id": data.external_id,
             "is_continuation": False,
         }))
         return StreamingResponse(
