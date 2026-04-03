@@ -6,10 +6,9 @@ Every other AI pixel art generator is a diffusion model pretending to understand
 
 Texel Studio is different. An AI agent picks up a brush, places pixels on a canvas one at a time, steps back to look at what it drew, and decides what to fix. It uses shapes, noise fills, and detail tools — the same way a human pixel artist works. Every pixel is intentional. Every color is from your palette. The output is exact, consistent, and game-ready.
 
-Built with LangGraph + Gemini/OpenAI. Runs locally with a web UI.
+This is the open-source engine that powers [texel.studio](https://texel.studio).
 
 https://github.com/user-attachments/assets/bc2c0e85-062a-4f5e-ac7c-b8c0d91fe63d
-
 
 ## How it works
 
@@ -42,6 +41,7 @@ Diffusion models hallucinate pixels. This tool places them.
 - `draw_line` — Bresenham lines
 - `draw_circle`, `draw_ellipse` — round shapes (filled or outline)
 - `draw_triangle` — filled triangles
+- `draw_rotated_rect` — angled rectangles
 
 **Texture**
 - `noise_fill_rect`, `noise_fill_circle` — random color distribution for natural variation
@@ -63,7 +63,8 @@ Diffusion models hallucinate pixels. This tool places them.
 - **Autotile generation** — generate all 16 edge variants for tilemap use
 - **Export** — native PNG, upscaled preview, or full tileset folder
 - **History** — browse and reload past generations
-- **LangSmith tracing** — optional observability for agent runs
+- **S3 storage** — optional S3-compatible object storage for shared file access across workers
+- **Observability** — optional LangSmith and/or PostHog LLM analytics tracing
 
 ## Setup
 
@@ -108,25 +109,70 @@ After generating a block sprite, click "Generate Tileset" to create all 16 autot
 
 Output: `BlockName_00.png` through `BlockName_15.png`
 
-## Cloud Version
-
-A hosted version with authentication, credit-based billing, and a shared gallery is available at [texel.studio](https://texel.studio).
-
 ## Scaling (Optional)
 
-For concurrent generation support, add Redis:
+For concurrent generation support, add Redis and run workers:
 
 ```bash
-# Set Redis URL in .env
+# Set in .env
 REDIS_URL=redis://localhost:6379
 
-# Run both the API server and worker(s)
+# Run the API server + worker(s)
 python server.py &
 python worker.py &
 python worker.py &  # add more workers for more parallelism
 ```
 
+Workers pull jobs from a Redis queue and publish results via pub/sub. Chat continuation is automatically routed to the worker that holds the agent session.
+
 Without Redis, the engine handles one generation at a time — fine for personal use.
+
+## Storage (Optional)
+
+By default, generated images and references are saved to the local filesystem. For multi-worker deployments where workers run on separate machines, configure S3-compatible object storage:
+
+```bash
+# Set in .env — works with AWS S3, Railway Object Store, Cloudflare R2, MinIO, etc.
+ENDPOINT=https://your-s3-endpoint
+ACCESS_KEY_ID=your_key
+SECRET_ACCESS_KEY=your_secret
+BUCKET=your_bucket
+```
+
+Without these, everything uses the local filesystem.
+
+## Observability (Optional)
+
+**LangSmith** — LangChain's tracing platform:
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your_key
+LANGSMITH_PROJECT=texel-studio
+```
+
+**PostHog LLM Analytics** — traces, token counts, latency, costs:
+```bash
+POSTHOG_API_KEY=phc_your_key
+POSTHOG_HOST=https://us.i.posthog.com
+```
+
+Both can run in parallel. Neither is required.
+
+## Cloud Version — [texel.studio](https://texel.studio)
+
+Don't want to self-host? The cloud version is ready to use:
+
+- **Sign up and start creating** — no API keys, no setup, no Python
+- **5 free credits daily** — no credit card required
+- **Pro plan** — $9/month for 200 credits with rollover
+- **Credit packs** — buy 100, 250, or 700 credits anytime
+- **Per-user palettes** — create, edit, share to a public gallery
+- **Generation history** — saved to your account, pick up where you left off
+- **Shared gallery** — browse and copy other users' sprites and palettes
+
+The cloud runs this same engine on Railway with Redis workers, Supabase for auth and data, and Polar.sh for billing. The generation quality is identical — the cloud just removes the friction.
+
+**[Start creating at texel.studio →](https://texel.studio)**
 
 ## Tech Stack
 
@@ -134,7 +180,8 @@ Without Redis, the engine handles one generation at a time — fine for personal
 - **AI**: Google Gemini + OpenAI (pluggable)
 - **Frontend**: Next.js (static export to `static/`)
 - **Queue**: Redis (optional, for concurrent generations)
-- **Tracing**: LangSmith (optional)
+- **Storage**: S3-compatible (optional, for multi-worker file sharing)
+- **Tracing**: LangSmith + PostHog (optional)
 
 ## License
 
