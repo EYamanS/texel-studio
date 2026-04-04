@@ -357,6 +357,30 @@ IMPORTANT RULES:
         "agent_hint": "This is an ITEM ICON. Draw the object shape and use -1 (transparent) for the background. Keep it compact, chunky, and recognizable. Leave some transparent padding around the edges.",
         "has_tileset": False,
     },
+    "character": {
+        "label": "Character",
+        "ref_prompt": """Pixel art character sprite for a 2D game.
+IMPORTANT RULES:
+- Single character on a TRANSPARENT background.
+- Front-facing or side-facing idle pose.
+- Clear silhouette — the character should be instantly recognizable.
+- Pixel art style with visible individual pixels. No anti-aliasing.
+- Include basic details: eyes, clothing, distinguishing features.
+- Readable at small sizes. Leave transparent padding around the character.""",
+        "agent_hint": "This is a CHARACTER SPRITE. Draw a character on transparent background (-1). Make the silhouette clear and recognizable. Leave transparent padding around the edges.",
+        "has_tileset": False,
+    },
+    "freeform": {
+        "label": "Freeform",
+        "ref_prompt": """Pixel art image.
+Create whatever the user describes in pixel art style.
+- Visible individual pixels, crisp edges, no anti-aliasing.
+- Use the full canvas as you see fit based on the subject.
+- If the subject is an object, center it on transparent background.
+- If the subject is a scene or pattern, fill the canvas.""",
+        "agent_hint": "This is a FREEFORM sprite. Use your best judgment for the composition. If the subject is a standalone object or character, use -1 (transparent) for the background. If it's a scene, pattern, or texture, fill the entire canvas.",
+        "has_tileset": False,
+    },
 }
 
 def load_reference_b64(ref_id: str | None) -> str | None:
