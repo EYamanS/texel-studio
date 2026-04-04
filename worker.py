@@ -35,6 +35,12 @@ import storage
 from agent import run_agent_stream as agent_run
 from google import genai
 
+# Initialize Gemini credentials (sets GOOGLE_APPLICATION_CREDENTIALS if using service account)
+try:
+    gemini()
+except Exception:
+    pass  # Will fail later with a clear error if no credentials
+
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 CLOUD_WEBHOOK_URL = os.getenv("CLOUD_WEBHOOK_URL")
 CLOUD_API_KEY = os.getenv("API_KEY", "")
