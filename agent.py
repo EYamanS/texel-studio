@@ -447,7 +447,7 @@ def _get_llm(model_name: str, temperature: float = 0.7):
         model_name=model_name,
         temperature=temperature,
         project=project,
-        location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
+        location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
     )
 
 
