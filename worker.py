@@ -92,8 +92,8 @@ def handle_generate(job: dict):
         step_count[0] += 1
         publish_event(job_id, sse_event("log", {"step": f"{step_type}_{step_count[0]}", "message": msg}))
 
-        is_view = "view_canvas" in msg
-        if step_type == "tool_call" and (is_view or step_count[0] - last_pixel_step[0] >= 2):
+        # Send pixel snapshots on tool_result (AFTER execution, canvas is updated)
+        if step_type == "tool_result" and (step_count[0] - last_pixel_step[0] >= 1):
             last_pixel_step[0] = step_count[0]
             px_copy = [row[:] for row in canvas.pixels]
             publish_event(job_id, sse_event("pixels", {

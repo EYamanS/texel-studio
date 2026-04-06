@@ -155,6 +155,52 @@ class Canvas:
         rows = [f"{y:>3} " + " ".join(f"{v:>3}" for v in row) for y, row in enumerate(self.pixels)]
         return header + "\n" + "\n".join(rows)
 
+    def to_visual_grid(self) -> str:
+        """Compact visual grid using single-char symbols. Much easier for small LLMs to parse."""
+        # Map palette indices to readable chars: 0=0, 1=1, ..., 9=9, 10=A, 11=B, ..., -1=.
+        def _char(v: int) -> str:
+            if v < 0: return "."
+            if v < 10: return str(v)
+            if v < 36: return chr(ord("A") + v - 10)
+            return "#"
+
+        # Column ruler
+        if self.size <= 16:
+            ruler = "   " + "".join(f"{x:X}" for x in range(self.size))
+        else:
+            # Two-line ruler for 32+
+            tens = "   " + "".join(str(x // 10) if x >= 10 else " " for x in range(self.size))
+            ones = "   " + "".join(f"{x % 10}" for x in range(self.size))
+            ruler = tens + "\n" + ones
+
+        rows = []
+        for y, row in enumerate(self.pixels):
+            label = f"{y:>2} " if self.size <= 16 else f"{y:>3}"
+            rows.append(label + "".join(_char(v) for v in row))
+
+        return ruler + "\n" + "\n".join(rows)
+
+    def region_summary(self, y1: int, x1: int, y2: int, x2: int) -> str:
+        """Describe what's in a rectangular region — helps the model understand spatial layout."""
+        counts: dict[int, int] = {}
+        for y in range(max(0, y1), min(self.size, y2 + 1)):
+            for x in range(max(0, x1), min(self.size, x2 + 1)):
+                v = self.pixels[y][x]
+                counts[v] = counts.get(v, 0) + 1
+        total = sum(counts.values())
+        if total == 0:
+            return "empty"
+        parts = []
+        for idx, c in sorted(counts.items(), key=lambda x: -x[1]):
+            pct = c * 100 // total
+            if pct < 5:
+                continue
+            if idx < 0:
+                parts.append(f"empty:{pct}%")
+            else:
+                parts.append(f"{idx}:{pct}%")
+        return " ".join(parts)
+
     # ── Shape drawing ──
 
     def draw_circle(self, cx: int, cy: int, radius: int, color: int, fill: bool = True) -> int:
@@ -288,7 +334,19 @@ class Canvas:
 
 # ── Tool factory ──
 
-def make_tools(canvas: Canvas):
+def _is_vision_model(model_name: str) -> bool:
+    """Check if a model supports image input (base64 previews)."""
+    # Ollama local models generally don't support vision
+    ollama = set(m.strip() for m in os.getenv("OLLAMA_MODELS", "").split(",") if m.strip())
+    if model_name in ollama:
+        return False
+    # Most cloud models support vision
+    return True
+
+
+def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True):
+    """Create agent tools. vision=False omits base64 previews. full_toolset=False drops advanced shape/noise tools."""
+
     @tool
     def draw_pixel(x: int, y: int, color: int) -> str:
         """Set a single pixel at (x, y) to a palette color index. Use -1 for transparent."""
@@ -296,7 +354,7 @@ def make_tools(canvas: Canvas):
 
     @tool
     def draw_pixels(pixels: list[dict]) -> str:
-        """Set multiple pixels at once. Each dict has keys: x, y, color."""
+        """Set multiple pixels at once. Each dict has keys: x, y, color. Use this for efficiency when setting many pixels."""
         errors = []
         drawn = 0
         for p in pixels:
@@ -334,11 +392,17 @@ def make_tools(canvas: Canvas):
         return canvas.draw_line(x1, y1, x2, y2, color)
 
     @tool
-    def view_canvas() -> str:
-        """View the current canvas state. Returns the pixel index grid, color usage summary, and a base64 PNG preview image of the rendered sprite. Use this to check your work visually."""
-        grid = canvas.to_grid_string()
-        img_b64 = canvas.to_image_b64(64)
+    def draw_circle(cx: int, cy: int, radius: int, color: int, fill: bool = True) -> str:
+        """Draw a circle. cx,cy = center, radius = size. fill=True for solid, fill=False for outline only."""
+        count = canvas.draw_circle(cx, cy, radius, color, fill)
+        return f"Drew {'filled' if fill else 'outline'} circle at ({cx},{cy}) r={radius}, {count}px"
 
+    @tool
+    def view_canvas() -> str:
+        """View the current canvas. Returns a visual grid where each character is a palette index (0-9, A-Z) and '.' is transparent. Use this to check your work."""
+        grid = canvas.to_visual_grid()
+
+        # Color usage summary
         color_counts: dict[int, int] = {}
         for row in canvas.pixels:
             for v in row:
@@ -347,12 +411,25 @@ def make_tools(canvas: Canvas):
         summary = []
         for idx, count in sorted(color_counts.items(), key=lambda x: -x[1]):
             if idx == -1:
-                summary.append(f"transparent: {count}px")
+                summary.append(f". = transparent: {count}px")
             elif 0 <= idx < len(canvas.palette):
-                summary.append(f"{idx}({canvas.palette[idx]}): {count}px")
+                char = str(idx) if idx < 10 else chr(ord("A") + idx - 10)
+                summary.append(f"{char} = {idx}({canvas.palette[idx]}): {count}px")
 
         total = sum(c for i, c in color_counts.items() if i >= 0)
-        return f"{grid}\n\nCOLOR USAGE: {', '.join(summary[:12])}\nFilled: {total}/{canvas.size*canvas.size}px\n\n[RENDERED PREVIEW base64 PNG 64x64]\n{img_b64}"
+
+        # Spatial summary: describe each quadrant
+        half = canvas.size // 2
+        spatial = f"TOP-LEFT: {canvas.region_summary(0, 0, half-1, half-1)} | TOP-RIGHT: {canvas.region_summary(0, half, half-1, canvas.size-1)} | BOTTOM-LEFT: {canvas.region_summary(half, 0, canvas.size-1, half-1)} | BOTTOM-RIGHT: {canvas.region_summary(half, half, canvas.size-1, canvas.size-1)}"
+
+        result = f"{grid}\n\nLEGEND: {', '.join(summary[:12])}\nFilled: {total}/{canvas.size*canvas.size}px\nLAYOUT: {spatial}"
+
+        # Only include base64 preview for vision-capable models
+        if vision:
+            img_b64 = canvas.to_image_b64(64)
+            result += f"\n\n[PREVIEW base64 PNG 64x64]\n{img_b64}"
+
+        return result
 
     @tool
     def get_pixel(x: int, y: int) -> str:
@@ -366,13 +443,23 @@ def make_tools(canvas: Canvas):
         """Call this when the sprite is complete and you're satisfied with the result."""
         return "FINISHED"
 
-    # ── Shape tools ──
-
     @tool
-    def draw_circle(cx: int, cy: int, radius: int, color: int, fill: bool = True) -> str:
-        """Draw a circle. cx,cy = center, radius = size. fill=True for solid, fill=False for outline only."""
-        count = canvas.draw_circle(cx, cy, radius, color, fill)
-        return f"Drew {'filled' if fill else 'outline'} circle at ({cx},{cy}) r={radius}, {count}px"
+    def noise_fill_rect(x1: int, y1: int, x2: int, y2: int, colors: list[int], seed: int = 42, scale: float = 1.0) -> str:
+        """Fill a rectangle with noise-distributed colors. Randomly picks from the color list per pixel based on noise. Use different seeds for variation. Scale controls granularity (higher = finer)."""
+        count = canvas.fill_noise(x1, y1, x2, y2, colors, seed, scale)
+        return f"Noise-filled rect ({x1},{y1})-({x2},{y2}) with {len(colors)} colors, {count}px"
+
+    # Core tools — always included (8 tools)
+    core = [
+        draw_pixel, draw_pixels, fill_rect, fill_row, fill_column, draw_line,
+        draw_circle, noise_fill_rect,
+        view_canvas, get_pixel, finish,
+    ]
+
+    if not full_toolset:
+        return core
+
+    # Advanced tools — only for capable models
 
     @tool
     def draw_ellipse(cx: int, cy: int, rx: int, ry: int, color: int, fill: bool = True) -> str:
@@ -392,14 +479,6 @@ def make_tools(canvas: Canvas):
         count = canvas.draw_rotated_rect(cx, cy, width, height, angle, color)
         return f"Drew rotated rect at ({cx},{cy}) {width}x{height} angle={angle}deg, {count}px"
 
-    # ── Noise tools ──
-
-    @tool
-    def noise_fill_rect(x1: int, y1: int, x2: int, y2: int, colors: list[int], seed: int = 42, scale: float = 1.0) -> str:
-        """Fill a rectangle with noise-distributed colors. Randomly picks from the color list per pixel based on noise. Use different seeds for variation. Scale controls granularity (higher = finer)."""
-        count = canvas.fill_noise(x1, y1, x2, y2, colors, seed, scale)
-        return f"Noise-filled rect ({x1},{y1})-({x2},{y2}) with {len(colors)} colors, {count}px"
-
     @tool
     def noise_fill_circle(cx: int, cy: int, radius: int, colors: list[int], seed: int = 42) -> str:
         """Fill a circular area with noise-distributed colors. Good for organic patches, spots, texture within a round area."""
@@ -412,12 +491,7 @@ def make_tools(canvas: Canvas):
         count = canvas.fill_voronoi(x1, y1, x2, y2, colors, num_cells, seed)
         return f"Voronoi-filled rect ({x1},{y1})-({x2},{y2}) with {num_cells} cells, {count}px"
 
-    return [
-        draw_pixel, draw_pixels, fill_rect, fill_row, fill_column, draw_line,
-        draw_circle, draw_ellipse, draw_triangle, draw_rotated_rect,
-        noise_fill_rect, noise_fill_circle, voronoi_fill,
-        view_canvas, get_pixel, finish,
-    ]
+    return core + [draw_ellipse, draw_triangle, draw_rotated_rect, noise_fill_circle, voronoi_fill]
 
 
 # ── LLM factory ──
@@ -476,7 +550,9 @@ def _get_or_create_session(gen_id: int, canvas: Canvas, model_name: str):
         s = _sessions[gen_id]
         return s["agent"], s["thread_id"], s["canvas"]
 
-    tools = make_tools(canvas)
+    vision = _is_vision_model(model_name)
+    full_toolset = vision  # small local models get the simplified toolset
+    tools = make_tools(canvas, vision=vision, full_toolset=full_toolset)
     llm = _get_llm(model_name)
     checkpointer = MemorySaver()
     agent = create_react_agent(llm, tools, checkpointer=checkpointer)
@@ -505,47 +581,91 @@ AGENT_TYPE_HINTS = {
 }
 
 def build_system_prompt(user_prompt: str, palette: list[str], size: int,
-                        style_prompt: str, has_reference: bool, sprite_type: str = "block") -> str:
-    palette_desc = "\n".join(f"  {i}: {c}" for i, c in enumerate(palette))
+                        style_prompt: str, has_reference: bool, sprite_type: str = "block",
+                        model_name: str = "") -> str:
+    palette_desc = "\n".join(
+        f"  {i} (char {'A' if i >= 10 else str(i) if i < 10 else chr(ord('A') + i - 10)}): {c}"
+        if i >= 10 else f"  {i}: {c}"
+        for i, c in enumerate(palette)
+    )
+    vision = _is_vision_model(model_name)
+    full_toolset = vision
+
+    # Tool list depends on model capability
+    if full_toolset:
+        tools_text = """- fill_rect(x1,y1,x2,y2,color) — fill a rectangle
+- fill_row(y,x_start,x_end,color) — fill one row
+- fill_column(x,y_start,y_end,color) — fill one column
+- draw_line(x1,y1,x2,y2,color) — 1px line
+- draw_circle(cx,cy,radius,color,fill) — circle (filled or outline)
+- draw_ellipse(cx,cy,rx,ry,color,fill) — ellipse
+- draw_triangle(x1,y1,x2,y2,x3,y3,color) — filled triangle
+- draw_rotated_rect(cx,cy,w,h,angle,color) — rotated rectangle
+- draw_pixel(x,y,color) — single pixel
+- draw_pixels([{{"x":0,"y":0,"color":1}},...]) — batch pixels
+- noise_fill_rect(x1,y1,x2,y2,colors,seed) — random texture fill
+- noise_fill_circle(cx,cy,r,colors,seed) — circular noise fill
+- voronoi_fill(x1,y1,x2,y2,colors,cells,seed) — cell/stone patterns
+- view_canvas() — see the grid (CALL THIS OFTEN)
+- get_pixel(x,y) — check one pixel
+- finish() — call when done"""
+    else:
+        tools_text = """- fill_rect(x1,y1,x2,y2,color) — fill a rectangle
+- fill_row(y,x_start,x_end,color) — fill one horizontal row
+- fill_column(x,y_start,y_end,color) — fill one vertical column
+- draw_line(x1,y1,x2,y2,color) — 1px line between two points
+- draw_circle(cx,cy,radius,color,fill) — circle (filled or outline)
+- draw_pixel(x,y,color) — set a single pixel
+- draw_pixels([{{"x":0,"y":0,"color":1}},...]) — set many pixels at once
+- noise_fill_rect(x1,y1,x2,y2,colors,seed) — fill area with random mix of colors (for texture)
+- view_canvas() — see the grid (CALL THIS OFTEN to check your work)
+- get_pixel(x,y) — check one pixel value
+- finish() — call when done"""
+
+    grid_explanation = f"""When you call view_canvas, you see a grid like this:
+   0123456789ABCDEF    ← column numbers (hex for 10-15)
+ 0 ................    ← row 0 (all transparent)
+ 1 ..0000000000....    ← row 1 (color 0 in columns 2-11)
+Each character is a palette index: 0-9 = colors 0-9, A-Z = colors 10-35, . = transparent
+Read it like a picture: rows go top to bottom (y), columns go left to right (x).""" if size <= 16 else f"""When you call view_canvas, you see a grid. Each character = one pixel.
+0-9 = palette colors 0-9, A-Z = colors 10-35, . = transparent.
+Rows = y (top to bottom), columns = x (left to right)."""
+
     return f"""{style_prompt}
 
-You are a pixel artist working on a {size}x{size} canvas.
-You have tools to draw pixels, fill rectangles, draw lines, and view your work.
+You are a pixel artist. You draw on a {size}x{size} canvas using color indices from a palette.
 
 SUBJECT: {user_prompt}
 
-PALETTE (color indices you can use):
+PALETTE:
 {palette_desc}
-Use -1 for transparent pixels.
+Use -1 for transparent.
 
 {AGENT_TYPE_HINTS.get(sprite_type, AGENT_TYPE_HINTS["block"])}
 
-{"A reference concept image is provided. Match its shapes, colors, and composition as closely as possible in pixel art form." if has_reference else ""}
+{"A reference image is attached. Match its shapes and colors in pixel art." if has_reference else ""}
 
-TOOLS AVAILABLE:
-- fill_rect, fill_row, fill_column — fill rectangular areas
-- draw_circle, draw_ellipse — round shapes (filled or outline)
-- draw_triangle — filled triangles
-- draw_rotated_rect — filled rectangle at any angle (center, width, height, angle in degrees)
-- draw_line — 1px lines
-- draw_pixel, draw_pixels — individual pixels
-- noise_fill_rect, noise_fill_circle — fill areas with random color distribution (great for texture)
-- voronoi_fill — cell/stone-like patterns (great for cobblestone, rocks, organic surfaces)
-- view_canvas — see current state (grid + rendered image)
-- get_pixel — check a single pixel
-- finish — call when done
+COORDINATE SYSTEM:
+- (0,0) = top-left corner
+- ({size-1},{size-1}) = bottom-right corner
+- x goes RIGHT (columns), y goes DOWN (rows)
+
+{grid_explanation}
+
+TOOLS:
+{tools_text}
 
 WORKFLOW:
-1. Start by filling the base shape with fill_rect or shapes
-2. Add texture with noise_fill_rect or voronoi_fill for natural variation
-3. Add detail with individual pixels or draw_pixels
-4. Use view_canvas to check your progress periodically
-5. Add edge darkening and final polish
-6. Use view_canvas one final time to verify
-7. Call finish when done
+1. Plan what to draw — think about the shape, then the colors
+2. Fill large areas first with fill_rect
+3. Call view_canvas to see your progress
+4. Add details with draw_pixel or draw_pixels
+5. Call view_canvas again to check
+6. Use noise_fill_rect to add texture variation if needed
+7. Final view_canvas to verify everything looks right
+8. Call finish when done
 
-Work methodically. Think about what you're drawing before each action.
-The canvas starts fully transparent (-1). Coordinates: (0,0) is top-left, ({size-1},{size-1}) is bottom-right."""
+IMPORTANT: Call view_canvas after every few drawing steps. It shows you exactly what the canvas looks like so you can correct mistakes early."""
 
 
 # ── Run agent (initial or continuation) ──
@@ -574,7 +694,7 @@ def run_agent_stream(
         agent, thread_id, canvas = _get_or_create_session(gen_id, canvas, model_name)
 
         # Build initial message with system prompt + optional reference
-        sys_prompt = build_system_prompt(message, palette, size, style_prompt, reference_b64 is not None, sprite_type)
+        sys_prompt = build_system_prompt(message, palette, size, style_prompt, reference_b64 is not None, sprite_type, model_name)
         user_parts = [{"type": "text", "text": sys_prompt}]
         if reference_b64:
             user_parts.append({
@@ -625,6 +745,8 @@ Use the canvas tools to make the requested changes. Call finish when done."""
                 step_count += 1
 
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    # Agent decided to call a tool — log it but DON'T snapshot pixels yet
+                    # (the tool hasn't executed, canvas hasn't changed)
                     for tc in msg.tool_calls:
                         info = f"Tool: {tc['name']}({json.dumps(tc['args'], separators=(',', ':'))})"
                         if on_step:
@@ -632,10 +754,13 @@ Use the canvas tools to make the requested changes. Call finish when done."""
 
                 elif hasattr(msg, "content") and isinstance(msg.content, str):
                     content = msg.content.strip()
-                    if content and on_step:
-                        on_step(canvas, "thought", content[:200])
                     if "FINISHED" in (msg.content or ""):
                         finished = True
+                    # Tool results come from the "tools" node — canvas has been updated
+                    if node_name == "tools" and on_step:
+                        on_step(canvas, "tool_result", content[:200])
+                    elif content and on_step:
+                        on_step(canvas, "thought", content[:200])
 
                 if step_count >= max_steps:
                     finished = True

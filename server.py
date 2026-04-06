@@ -581,9 +581,9 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
         step_count[0] += 1
         event_queue.put(sse_event("log", {"step": f"{step_type}_{step_count[0]}", "message": msg}))
 
-        # Always send pixels on view_canvas, otherwise every 2 tool calls
-        is_view = "view_canvas" in msg
-        if step_type == "tool_call" and (is_view or step_count[0] - last_pixel_step[0] >= 2):
+        # Send pixel snapshots on tool_result (AFTER execution, canvas is updated)
+        # Send on every tool result, or at least every 2 steps
+        if step_type == "tool_result" and (step_count[0] - last_pixel_step[0] >= 1):
             last_pixel_step[0] = step_count[0]
             px_copy = [row[:] for row in canvas.pixels]
             event_queue.put(sse_event("pixels", {
