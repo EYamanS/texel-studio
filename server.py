@@ -71,9 +71,12 @@ OPENAI_MODELS = [
     "gpt-4.1-2025-04-14",
     "gpt-4o-mini",
 ]
+# Extra OpenAI / OpenAI-compatible model names (Llama.cpp, VLLM, LM Studio, etc.) registered via env.
+# Combined with OPENAI_BASE_URL in agent.py to route requests to a local/self-hosted endpoint.
+OPENAI_MODELS_CUSTOM = [m.strip() for m in os.getenv("OPENAI_MODELS", "").split(",") if m.strip()]
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODELS = [m.strip() for m in os.getenv("OLLAMA_MODELS", "").split(",") if m.strip()]
-ALL_MODELS = GEMINI_MODELS + OPENAI_MODELS + OLLAMA_MODELS
+ALL_MODELS = GEMINI_MODELS + OPENAI_MODELS + OPENAI_MODELS_CUSTOM + OLLAMA_MODELS
 DEFAULT_MODEL = "gemini-3-flash-preview"
 IMAGE_GEN_MODELS = [
     "gemini-3.1-flash-image-preview",

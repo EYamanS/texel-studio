@@ -502,6 +502,10 @@ OPENAI_MODEL_PREFIXES = ("gpt-", "o1-", "o3-")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODELS = set(m.strip() for m in os.getenv("OLLAMA_MODELS", "").split(",") if m.strip())
 
+# OpenAI / OpenAI-compatible config (Llama.cpp, VLLM, LM Studio, etc.)
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
+OPENAI_MODELS_ENV = set(m.strip() for m in os.getenv("OPENAI_MODELS", "").split(",") if m.strip())
+
 def _get_llm(model_name: str, temperature: float = 0.7):
     # Ollama models (OpenAI-compatible API)
     if model_name in OLLAMA_MODELS:
@@ -513,10 +517,17 @@ def _get_llm(model_name: str, temperature: float = 0.7):
             api_key="ollama",
         )
 
-    # OpenAI models
-    if model_name.startswith(OPENAI_MODEL_PREFIXES):
+    # OpenAI / OpenAI-compatible models (custom names registered via OPENAI_MODELS, or standard prefixes)
+    if model_name in OPENAI_MODELS_ENV or model_name.startswith(OPENAI_MODEL_PREFIXES):
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=model_name, temperature=temperature)
+        kwargs: dict = {"model": model_name, "temperature": temperature}
+        if OPENAI_BASE_URL:
+            kwargs["base_url"] = OPENAI_BASE_URL
+            # Local OpenAI-compatible servers usually don't require a real key, but ChatOpenAI
+            # still expects something — fall back to a placeholder if OPENAI_API_KEY is unset.
+            if not os.getenv("OPENAI_API_KEY"):
+                kwargs["api_key"] = "not-needed"
+        return ChatOpenAI(**kwargs)
 
     # Gemini via API key
     if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
