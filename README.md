@@ -113,6 +113,15 @@ You need at least one AI provider configured:
 **OpenAI** (agent painting only, concept art still uses Gemini)
 - Add `OPENAI_API_KEY=your_key` to `.env`
 
+**OpenAI-compatible servers** (Llama.cpp, VLLM, LM Studio, OpenRouter, etc.)
+- Point at any OpenAI-compatible endpoint and register the model names you want in the UI:
+  ```bash
+  OPENAI_BASE_URL=http://localhost:8080/v1
+  OPENAI_MODELS=llama-3.1-8b-instruct,qwen2.5-coder-7b
+  # OPENAI_API_KEY=optional_for_local_servers   # required for hosted ones like OpenRouter
+  ```
+- Models listed in `OPENAI_MODELS` appear in the model dropdown alongside the built-in OpenAI models.
+
 All providers can be configured simultaneously — choose the model per generation in the UI.
 
 > **Want to run 100% free?** Install Ollama, pull a model, set `OLLAMA_MODELS` in `.env`, and you're done. No API keys needed. Concept art generation requires Gemini, but you can skip it and paint directly.
