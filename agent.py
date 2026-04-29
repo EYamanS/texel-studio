@@ -20,6 +20,44 @@ from langgraph.checkpoint.memory import MemorySaver
 
 import os
 
+
+# ── Checkpointer factory ──
+#
+# In self-hosted mode (no REDIS_URL) we keep the existing MemorySaver — sessions
+# live in worker memory, fine for a single process.
+#
+# In Redis-backed mode the LangGraph thread state is persisted to Redis Stack
+# via langgraph-checkpoint-redis, so any worker can resume any thread by ID.
+# That kills the worker-affinity routing the old `_sessions` dict required.
+#
+# RedisSaver.from_conn_string is a context manager. We hold a single open
+# instance for the process so it can be reused across run_agent_stream calls.
+
+_redis_checkpointer = None
+_redis_checkpointer_ctx = None
+
+
+def get_checkpointer():
+    """Return a process-wide checkpointer. Redis if REDIS_URL set, else Memory."""
+    global _redis_checkpointer, _redis_checkpointer_ctx
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        # Single in-memory saver per process is fine for the standalone engine.
+        if _redis_checkpointer is None:
+            _redis_checkpointer = MemorySaver()
+        return _redis_checkpointer
+    if _redis_checkpointer is None:
+        from langgraph.checkpoint.redis import RedisSaver
+        _redis_checkpointer_ctx = RedisSaver.from_conn_string(redis_url)
+        _redis_checkpointer = _redis_checkpointer_ctx.__enter__()
+        _redis_checkpointer.setup()
+    return _redis_checkpointer
+
+
+def _thread_id_for(gen_id) -> str:
+    """Deterministic thread ID per generation. Lets any worker resume any thread."""
+    return f"job_{gen_id}"
+
 # ── PostHog LLM Analytics (optional) ──
 
 _posthog_client = None
@@ -550,36 +588,26 @@ def _get_llm(model_name: str, temperature: float = 0.7):
     )
 
 
-# ── Active sessions (in-memory — keyed by generation_id) ──
+# ── Sessions ──
+#
+# The old in-memory `_sessions` dict is gone. LangGraph state lives in the
+# shared checkpointer (Redis in cloud, Memory for self-host). Canvas pixel
+# state is owned by the caller — passed in via `existing_pixels` for
+# continuations. Any worker can resume any thread by gen_id.
 
-_sessions: dict[int, dict] = {}
-
-
-def _get_or_create_session(gen_id: int, canvas: Canvas, model_name: str):
-    """Get existing session or create a new one. Returns (agent, thread_id, canvas)."""
-    if gen_id in _sessions:
-        s = _sessions[gen_id]
-        return s["agent"], s["thread_id"], s["canvas"]
-
-    vision = _is_vision_model(model_name)
-    full_toolset = vision  # small local models get the simplified toolset
-    tools = make_tools(canvas, vision=vision, full_toolset=full_toolset)
-    llm = _get_llm(model_name)
-    checkpointer = MemorySaver()
-    agent = create_react_agent(llm, tools, checkpointer=checkpointer)
-    thread_id = str(uuid.uuid4())
-
-    _sessions[gen_id] = {
-        "agent": agent,
-        "thread_id": thread_id,
-        "canvas": canvas,
-        "model": model_name,
-    }
-    return agent, thread_id, canvas
+def cleanup_session(gen_id) -> None:
+    """No-op for compatibility. State now lives in the shared checkpointer."""
+    return None
 
 
-def cleanup_session(gen_id: int):
-    _sessions.pop(gen_id, None)
+def thread_exists(gen_id) -> bool:
+    """Return True if a LangGraph thread already exists for this gen_id."""
+    cp = get_checkpointer()
+    config = {"configurable": {"thread_id": _thread_id_for(gen_id)}}
+    try:
+        return cp.get(config) is not None
+    except Exception:
+        return False
 
 
 # ── System prompt ──
@@ -682,7 +710,7 @@ IMPORTANT: Call view_canvas after every few drawing steps. It shows you exactly 
 # ── Run agent (initial or continuation) ──
 
 def run_agent_stream(
-    gen_id: int,
+    gen_id,
     message: str,
     palette: list[str],
     size: int,
@@ -693,18 +721,34 @@ def run_agent_stream(
     on_step: Any = None,
     max_steps: int = 80,
     existing_pixels: list[list[int]] | None = None,
+    cancel_check: Any = None,
 ):
     """
     Run the agent or continue an existing session.
-    First call creates the session. Subsequent calls continue the conversation.
+
+    First call (no thread for `gen_id`) creates the session and seeds it with the
+    full system prompt. Subsequent calls (thread already exists in checkpointer)
+    continue the conversation as a chat edit.
+
+    `cancel_check`, if provided, is a zero-arg callable returning True when the
+    job has been canceled. The stream loop checks it after every step and exits
+    cleanly (drains remaining chunks to avoid GeneratorExit in callbacks).
     """
-    is_new = gen_id not in _sessions
+    # Build the canvas from the caller-provided pixel state. Canvas pixel state
+    # lives outside the LangGraph thread (it's owned by the job system, not
+    # the conversation). LangGraph just owns the message history.
+    canvas = Canvas(size, palette, existing_pixels)
+    is_new = not thread_exists(gen_id)
+    thread_id = _thread_id_for(gen_id)
+
+    vision = _is_vision_model(model_name)
+    full_toolset = vision  # small local models get the simplified toolset
+    tools = make_tools(canvas, vision=vision, full_toolset=full_toolset)
+    llm = _get_llm(model_name)
+    checkpointer = get_checkpointer()
+    agent = create_react_agent(llm, tools, checkpointer=checkpointer)
 
     if is_new:
-        canvas = Canvas(size, palette, existing_pixels)
-        agent, thread_id, canvas = _get_or_create_session(gen_id, canvas, model_name)
-
-        # Build initial message with system prompt + optional reference
         sys_prompt = build_system_prompt(message, palette, size, style_prompt, reference_b64 is not None, sprite_type, model_name)
         user_parts = [{"type": "text", "text": sys_prompt}]
         if reference_b64:
@@ -714,12 +758,7 @@ def run_agent_stream(
             })
         input_message = HumanMessage(content=user_parts)
     else:
-        s = _sessions[gen_id]
-        agent = s["agent"]
-        thread_id = s["thread_id"]
-        canvas = s["canvas"]
-
-        # Follow-up: include current canvas state so AI knows what it's editing
+        # Follow-up: include current canvas state so the agent knows what it's editing
         grid = canvas.to_grid_string()
         follow_up = f"""The user wants you to make changes to the current sprite.
 
@@ -749,6 +788,18 @@ Use the canvas tools to make the requested changes. Call finish when done."""
     ):
         if finished:
             continue  # drain remaining chunks without processing
+
+        # Cooperative cancel check — if the job was canceled, stop driving the
+        # loop but keep draining so callbacks unwind cleanly.
+        if cancel_check is not None:
+            try:
+                if cancel_check():
+                    finished = True
+                    if on_step:
+                        on_step(canvas, "canceled", "Job canceled by user")
+                    continue
+            except Exception:
+                pass
 
         for node_name, node_data in chunk.items():
             messages = node_data.get("messages", [])

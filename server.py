@@ -672,6 +672,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Generic Job dispatcher ( /api/jobs ). The legacy /api/generate, /api/chat,
+# /api/reference, /api/tileset routes below remain in place for the standalone
+# engine UI; they share the same handler implementations under the hood.
+from jobs.dispatcher import router as jobs_router
+app.include_router(jobs_router)
+
 # Optional API key auth — set API_KEY env var to enable
 _API_KEY = os.getenv("API_KEY")
 

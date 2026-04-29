@@ -12,3 +12,6 @@ static/
 # Node
 frontend/node_modules/
 frontend/.next/
+
+# Local IDE / agent config
+.claude/

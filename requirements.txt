@@ -9,6 +9,7 @@ langchain>=1.0.0
 langchain-google-genai>=4.0.0
 langchain-google-vertexai>=3.0.0
 langgraph>=1.0.0
+langgraph-checkpoint-redis>=0.4.0
 langsmith>=0.7.0
 posthog>=3.0.0
 redis>=5.0.0

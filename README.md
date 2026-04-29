@@ -140,8 +140,12 @@ Output: `BlockName_00.png` through `BlockName_15.png`
 For concurrent generation support, add Redis and run workers:
 
 ```bash
-# Set in .env
+# Set in .env — must be Redis Stack (RediSearch module enabled),
+# not vanilla Redis. The LangGraph checkpointer needs FT.* commands.
 REDIS_URL=redis://localhost:6379
+
+# Local dev: run Redis Stack via Docker
+docker run -d --name texel-redis -p 6379:6379 redis/redis-stack-server:latest
 
 # Run the API server + worker(s)
 python server.py &
@@ -149,9 +153,9 @@ python worker.py &
 python worker.py &  # add more workers for more parallelism
 ```
 
-Workers pull jobs from a Redis queue and publish results via pub/sub. Chat continuation is automatically routed to the worker that holds the agent session.
+Workers pull jobs from a Redis queue, publish progress via pub/sub, and persist LangGraph thread state via `RedisSaver`. Any worker can resume any chat — no per-worker affinity. Vanilla Redis won't work because the checkpointer requires the search module; use Redis Stack, Redis Cloud, or a self-hosted Redis with `redisearch` enabled.
 
-Without Redis, the engine handles one generation at a time — fine for personal use.
+Without `REDIS_URL`, the engine runs single-process with an in-memory `MemorySaver` checkpointer — fine for personal use.
 
 ## Storage (Optional)
 
@@ -166,6 +170,55 @@ BUCKET=your_bucket
 ```
 
 Without these, everything uses the local filesystem.
+
+## Extending — adding a new job kind
+
+The engine has a generic `Job` abstraction. Every operation the agent does
+(generate, chat, reference, tileset, photo→pixel) is registered against a
+`kind` string. Adding a new kind is one file:
+
+```python
+# jobs/my_thing.py
+from pydantic import BaseModel
+from . import JobHandler, JobContext, register_job, log, result
+
+class MyParams(BaseModel):
+    prompt: str
+    size: int = 16
+
+@register_job("my.thing")
+class MyHandler(JobHandler):
+    Params = MyParams
+
+    def run(self, params: MyParams, ctx: JobContext):
+        yield log("Doing the thing...")
+        # ... do work, optionally yield progress(...) events ...
+        yield result(status="completed", payload={"hello": "world"})
+```
+
+Then import it once at startup (e.g. add `from . import my_thing` to
+`jobs/__init__.py:_load_builtins`). The dispatcher picks it up automatically.
+
+Drive it from anywhere:
+
+```bash
+curl -N -X POST http://localhost:8500/api/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"kind":"my.thing","params":{"prompt":"hi","size":32}}'
+```
+
+The same endpoint works in self-hosted (in-process) and queued (Redis) modes.
+Built-in kinds:
+
+| Kind | What it does |
+|---|---|
+| `sprite.generate` | AI-paints a sprite from a prompt |
+| `sprite.chat` | Continues editing an existing sprite via chat |
+| `sprite.reference` | Generates concept art (Gemini image gen) |
+| `sprite.tileset` | Builds the 16-variant autotile from a base sprite |
+| `sprite.from_photo` | Quantizes a photo to the chosen palette |
+
+`GET /api/jobs/kinds` returns the list at runtime.
 
 ## Observability (Optional)
 

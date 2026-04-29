@@ -256,6 +256,84 @@ def handle_reference(job: dict):
         r.publish(f"texel:result:{job_id}", json.dumps({"error": str(e)}))
 
 
+def handle_generic_job(job: dict):
+    """Dispatch a `{type:"job", kind, params, ...}` payload to the registered handler.
+
+    Streams handler events as SSE bytes on `texel:events:{job_id}` so the
+    server-side `/api/jobs` route (or `/api/jobs/{id}/stream`) fans them out.
+    On terminal events (`result` or `error`) we POST the cloud webhook so
+    the SaaS persists the result regardless of whether the user's SSE pipe
+    is still attached.
+    """
+    from jobs import JobContext, get_handler, parse_params
+    from jobs.dispatcher import event_to_sse, is_canceled
+
+    job_id = job["job_id"]
+    kind = job["kind"]
+    external_id = job.get("external_id")
+    raw_params = job.get("params", {})
+
+    # Cancel-check uses the same Redis key the dispatcher writes.
+    cancel_check = lambda: is_canceled(job_id)
+    ctx = JobContext(job_id=job_id, external_id=external_id, cancel_check=cancel_check)
+
+    terminal: dict | None = None
+    try:
+        params = parse_params(kind, raw_params)
+        handler_cls = get_handler(kind)
+        handler = handler_cls()
+
+        # Initial "job" event so clients know the job started.
+        publish_event(job_id, event_to_sse(_event("job", {"id": job_id, "kind": kind})))
+
+        for ev in handler.run(params, ctx):
+            publish_event(job_id, event_to_sse(ev))
+            if ev.name == "result":
+                terminal = {"status": "completed", **ev.data}
+            elif ev.name == "error":
+                terminal = {"status": "error", "error_message": ev.data.get("message", "unknown error")}
+            elif ev.name == "canceled":
+                terminal = {"status": "canceled"}
+
+        if terminal is None:
+            # Handler exited without emitting a terminal event — treat as error.
+            terminal = {"status": "error", "error_message": "Handler exited without result"}
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        publish_event(job_id, event_to_sse(_event("error", {"message": str(e)})))
+        terminal = {"status": "error", "error_message": str(e)}
+
+    finally:
+        publish_event(job_id, "__done__")
+
+    # Notify cloud — the SaaS uses this to persist final state regardless of
+    # whether the user's SSE connection is still alive.
+    if external_id and CLOUD_WEBHOOK_URL:
+        try:
+            import urllib.request
+            payload = {"external_id": external_id, "kind": kind, **(terminal or {})}
+            req = urllib.request.Request(
+                CLOUD_WEBHOOK_URL,
+                data=json.dumps(payload).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": CLOUD_API_KEY,
+                },
+            )
+            urllib.request.urlopen(req, timeout=30)
+            print(f"[{WORKER_ID}] Webhook OK for {external_id} ({kind})")
+        except Exception as we:
+            print(f"[{WORKER_ID}] Webhook failed for {external_id}: {we}")
+
+
+def _event(name: str, data: dict):
+    """Tiny wrapper so we don't import jobs.Event in worker.py top-level."""
+    from jobs import Event
+    return Event(name=name, data=data)
+
+
 def main_loop():
     print(f"[{WORKER_ID}] Worker started, listening for jobs...")
 
@@ -274,7 +352,10 @@ def main_loop():
 
             print(f"[{WORKER_ID}] Processing {job_type} job: {job.get('job_id', '?')}")
 
-            if job_type in ("generate", "chat"):
+            if job_type == "job":
+                # New generic shape: {type: "job", kind, job_id, external_id, params}
+                handle_generic_job(job)
+            elif job_type in ("generate", "chat"):
                 handle_generate(job)
             elif job_type == "reference":
                 handle_reference(job)
