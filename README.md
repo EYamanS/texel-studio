@@ -277,3 +277,5 @@ Source-available. Use it freely — self-host, modify, use commercially, sell an
 ---
 
 Built by [Emir Yaman Sivrikaya](https://github.com/EYamanS)
+
+<sub><b>Keywords:</b> AI pixel art generator · text to pixel art · pixel art AI · sprite generator · game asset generator · pixel-art tool · AI sprite art · generate pixel art from a prompt.</sub>
