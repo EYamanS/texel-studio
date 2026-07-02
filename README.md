@@ -1,5 +1,7 @@
 # Texel Studio
 
+[![Buy me a coffee](https://img.shields.io/badge/%E2%98%95%20Buy%20me%20a%20coffee-support-FF813F)](https://buy.polar.sh/polar_cl_v4ZIuYffdbN9E9iVLmlHh1W5sxAmxvqNVqIn81048FX)
+
 **The only pixel art tool that actually paints like a real artist.**
 
 Every other AI pixel art generator is a diffusion model pretending to understand pixels. They output blurry approximations — inconsistent colors, broken edges, half-pixel artifacts, and results that look different every time you run the same prompt. They don't understand what a pixel *is*.
@@ -261,6 +263,12 @@ The cloud runs this same engine on Railway with Redis workers, Supabase for auth
 - **Queue**: Redis (optional, for concurrent generations)
 - **Storage**: S3-compatible (optional, for multi-worker file sharing)
 - **Tracing**: LangSmith + PostHog (optional)
+
+## Support
+
+Built this in the open. If it saved you time, a one-off tip keeps it maintained:
+
+[![Buy me a coffee](https://img.shields.io/badge/%E2%98%95%20Buy%20me%20a%20coffee-support%20this%20project-FF813F?style=for-the-badge)](https://buy.polar.sh/polar_cl_v4ZIuYffdbN9E9iVLmlHh1W5sxAmxvqNVqIn81048FX)
 
 ## License
 
