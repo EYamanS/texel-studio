@@ -71,6 +71,7 @@ Diffusion models hallucinate pixels. This tool places them.
 
 ## Setup
 
+### Unix/MacOS
 ```bash
 git clone https://github.com/EYamanS/texel-studio.git
 cd texel-studio
@@ -84,6 +85,22 @@ source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env       # edit with your API key(s)
 cd frontend && npm install && npm run build && cd ..
+python server.py
+```
+
+Open `http://localhost:8500`
+
+### Windows
+
+```bash
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env       # edit with your API key(s)
+cd frontend
+npm install
+npm run build
+cd ..
 python server.py
 ```
 
