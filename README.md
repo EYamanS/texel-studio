@@ -96,7 +96,7 @@ You need at least one AI provider configured:
 **Ollama (free, runs locally)**
 - Install [Ollama](https://ollama.com) and pull a model:
   ```bash
-  ollama pull ggml-org/gemma-4-E4B-it-GGUF:Q8_0
+  ollama pull hf.co/ggml-org/gemma-4-E4B-it-GGUF:Q8_0
   ```
 - Add to `.env`:
   ```bash
