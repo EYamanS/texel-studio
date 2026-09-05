@@ -77,7 +77,7 @@ OPENAI_MODELS_CUSTOM = [m.strip() for m in os.getenv("OPENAI_MODELS", "").split(
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODELS = [m.strip() for m in os.getenv("OLLAMA_MODELS", "").split(",") if m.strip()]
 ALL_MODELS = GEMINI_MODELS + OPENAI_MODELS + OPENAI_MODELS_CUSTOM + OLLAMA_MODELS
-DEFAULT_MODEL = "gemini-3-flash-preview"
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-3-flash-preview")
 IMAGE_GEN_MODELS = [
     "gemini-3.1-flash-image-preview",
 ]
@@ -885,6 +885,33 @@ def serve_reference(ref_id: str):
         raise HTTPException(404)
     return Response(content=data, media_type="image/png")
 
+@app.get("/api/reference/{ref_id}/palette")
+def extract_reference_palette(ref_id: str, max_colors: int = 16):
+    """Extract dominant palette colors from a reference image."""
+    from collections import Counter
+    import storage
+    data = storage.read_file(f"references/{ref_id}")
+    if not data:
+        raise HTTPException(404, "Reference not found")
+
+    img = Image.open(io.BytesIO(data)).convert("RGBA")
+    opaque = [p[:3] for p in img.getdata() if p[3] >= 128]
+    if not opaque:
+        return {"colors": ["#000000"]}
+
+    counts = Counter(opaque)
+    if len(counts) <= max_colors:
+        raw_colors = [c for c, _ in counts.most_common(max_colors)]
+    else:
+        flat = Image.new("RGB", (len(opaque), 1))
+        flat.putdata(opaque)
+        q = flat.quantize(colors=max_colors, method=Image.Quantize.MEDIANCUT)
+        pal = q.getpalette()[:max_colors * 3]
+        raw_colors = [(pal[i], pal[i+1], pal[i+2]) for i in range(0, len(pal), 3)]
+
+    raw_colors.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
+    return {"colors": [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in raw_colors]}
+
 # ── Generation endpoints ──
 
 @app.get("/api/generations")
@@ -938,7 +965,7 @@ async def start_generation(data: GenerateRequest):
         raise HTTPException(400, "Colors array is required")
 
     db = get_db()
-    model = data.model if data.model in GEMINI_MODELS else DEFAULT_MODEL
+    model = data.model if data.model in ALL_MODELS else DEFAULT_MODEL
     cur = db.execute(
         "INSERT INTO generations (prompt, system_prompt, colors, size, model, reference_id, sprite_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (data.prompt, data.system_prompt, json.dumps(data.colors), data.size, model, data.reference_id, data.sprite_type),
