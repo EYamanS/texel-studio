@@ -117,6 +117,25 @@ export function useStudio() {
     setRefConfirmed(false);
   }, []);
 
+  const extractReferencePalette = useCallback(async () => {
+    if (!referenceId) return;
+    try {
+      const data = await api<{ colors: string[] }>(`/reference/${referenceId}/palette`);
+      if (data?.colors?.length) {
+        const palName = `Ref Palette (${data.colors.length}c)`;
+        const newPal = await api<Palette>("/palettes", {
+          method: "POST",
+          body: JSON.stringify({ name: palName, colors: data.colors }),
+        });
+        await loadPalettes();
+        setCurrentPalette(newPal);
+        setSelectedColorIdx(0);
+      }
+    } catch (e) {
+      console.error("Failed to extract palette from reference:", e);
+    }
+  }, [referenceId, loadPalettes]);
+
   // ── Generation (SSE) ──
   const generate = useCallback(async (opts: {
     prompt: string;
@@ -310,6 +329,7 @@ export function useStudio() {
     loadSettings, loadPalettes, loadHistory,
     selectPalette, setSelectedColorIdx, addColor, savePaletteAs,
     generateReference, reviseReference, uploadReference, confirmReference, clearReference,
+    extractReferencePalette,
     generate, sendChat, skipAndFinalize,
     loadGeneration, deleteGeneration,
     setPixel, setSpriteSize, setPixelData,

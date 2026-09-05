@@ -260,6 +260,14 @@ export function ControlPanel({ studio }: { studio: any }) {
                   <button className="btn flex-1" onClick={handleRevise}>revise</button>
                   <button className="btn btn-danger" onClick={studio.clearReference}>x</button>
                 </div>
+                <button
+                  className="btn w-full mt-1.5"
+                  style={{ fontSize: "10px" }}
+                  onClick={studio.extractReferencePalette}
+                  title="Extract colors from reference into active palette"
+                >
+                  copy palette from ref
+                </button>
               </motion.div>
             )}
           </AnimatePresence>
