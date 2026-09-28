@@ -115,7 +115,7 @@ You need at least one AI provider configured:
 **OpenAI** (agent painting; concept art uses Gemini unless you set `OPENAI_IMAGE_MODELS`, see below)
 - Add `OPENAI_API_KEY=your_key` to `.env`
 
-**OpenAI-compatible servers** (Llama.cpp, VLLM, LM Studio, OpenRouter, etc.)
+**OpenAI-compatible servers** (Llama.cpp, VLLM, LM Studio, OpenRouter, NanoGPT, etc.)
 - Point at any OpenAI-compatible endpoint and register the model names you want in the UI:
   ```bash
   OPENAI_BASE_URL=http://localhost:8080/v1
@@ -123,6 +123,8 @@ You need at least one AI provider configured:
   # OPENAI_API_KEY=optional_for_local_servers   # required for hosted ones like OpenRouter
   ```
 - Models listed in `OPENAI_MODELS` appear in the model dropdown alongside the built-in OpenAI models.
+- For NanoGPT, use `OPENAI_BASE_URL=https://nano-gpt.com/api/v1` with your NanoGPT key as `OPENAI_API_KEY`.
+- The painting agent works through tool calls, so pick models that support tool calling (and image input, if you attach a concept-art reference).
 
 **OpenAI-compatible image models** (NanoGPT, OpenAI `gpt-image-1`, etc. — for concept art)
 - Point concept-art generation at any OpenAI-compatible `/images/generations` endpoint, e.g. [NanoGPT](https://nano-gpt.com):

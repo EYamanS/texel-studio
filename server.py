@@ -1030,7 +1030,7 @@ async def start_generation(data: GenerateRequest):
         raise HTTPException(400, "Colors array is required")
 
     db = get_db()
-    model = data.model if data.model in GEMINI_MODELS else DEFAULT_MODEL
+    model = data.model if data.model in ALL_MODELS else DEFAULT_MODEL
     cur = db.execute(
         "INSERT INTO generations (prompt, system_prompt, colors, size, model, reference_id, sprite_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (data.prompt, data.system_prompt, json.dumps(data.colors), data.size, model, data.reference_id, data.sprite_type),
