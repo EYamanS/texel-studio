@@ -112,10 +112,10 @@ You need at least one AI provider configured:
 - Add `GEMINI_API_KEY=your_key` to `.env`
 - Or use a Google Cloud service account for Vertex AI
 
-**OpenAI** (agent painting only, concept art still uses Gemini)
+**OpenAI** (agent painting; concept art uses Gemini unless you set `OPENAI_IMAGE_MODELS`, see below)
 - Add `OPENAI_API_KEY=your_key` to `.env`
 
-**OpenAI-compatible servers** (Llama.cpp, VLLM, LM Studio, OpenRouter, etc.)
+**OpenAI-compatible servers** (Llama.cpp, VLLM, LM Studio, OpenRouter, NanoGPT, etc.)
 - Point at any OpenAI-compatible endpoint and register the model names you want in the UI:
   ```bash
   OPENAI_BASE_URL=http://localhost:8080/v1
@@ -123,10 +123,25 @@ You need at least one AI provider configured:
   # OPENAI_API_KEY=optional_for_local_servers   # required for hosted ones like OpenRouter
   ```
 - Models listed in `OPENAI_MODELS` appear in the model dropdown alongside the built-in OpenAI models.
+- For NanoGPT, use `OPENAI_BASE_URL=https://nano-gpt.com/api/v1` with your NanoGPT key as `OPENAI_API_KEY`.
+- The painting agent works through tool calls, so pick models that support tool calling (and image input, if you attach a concept-art reference).
+
+**OpenAI-compatible image models** (NanoGPT, OpenAI `gpt-image-1`, etc. — for concept art)
+- Point concept-art generation at any OpenAI-compatible `/images/generations` endpoint, e.g. [NanoGPT](https://nano-gpt.com):
+  ```bash
+  OPENAI_IMAGE_BASE_URL=https://nano-gpt.com/api/v1
+  OPENAI_IMAGE_API_KEY=your_nanogpt_key
+  OPENAI_IMAGE_MODELS=hidream,z-image-turbo,qwen-image,chroma
+  # OPENAI_IMAGE_SIZE=1024x1024   # default; e.g. 512x512 for cheaper, faster references
+  ```
+- Models listed in `OPENAI_IMAGE_MODELS` appear in the "concept model" dropdown; the first one is the default.
+- Without `OPENAI_IMAGE_BASE_URL`, image requests go to `OPENAI_BASE_URL` (or api.openai.com) with `OPENAI_API_KEY`.
+- Pick text-to-image models. Edit-only models such as `step-image-edit-2` cap prompts at 512 characters, and the concept-art prompts are longer than that.
+- If you run Redis workers, give them the same variables.
 
 All providers can be configured simultaneously — choose the model per generation in the UI.
 
-> **Want to run 100% free?** Install Ollama, pull a model, set `OLLAMA_MODELS` in `.env`, and you're done. No API keys needed. Concept art generation requires Gemini, but you can skip it and paint directly.
+> **Want to run 100% free?** Install Ollama, pull a model, set `OLLAMA_MODELS` in `.env`, and you're done. No API keys needed. Concept art generation needs Gemini or an OpenAI-compatible image model, but you can skip it and paint directly.
 
 ## Autotile Export
 
@@ -216,11 +231,25 @@ Built-in kinds:
 |---|---|
 | `sprite.generate` | AI-paints a sprite from a prompt |
 | `sprite.chat` | Continues editing an existing sprite via chat |
-| `sprite.reference` | Generates concept art (Gemini image gen) |
+| `sprite.reference` | Generates concept art (Gemini or OpenAI-compatible image models) |
 | `sprite.tileset` | Builds the 16-variant autotile from a base sprite |
 | `sprite.from_photo` | Quantizes a photo to the chosen palette |
 
 `GET /api/jobs/kinds` returns the list at runtime.
+
+## Logs & troubleshooting
+
+The engine logs to the terminal and to `logs/texel.log` (rotated at 5 MB). At startup it lists which providers are configured, but never the keys. While it runs, it logs every concept-art request and every model call, with timings:
+
+```
+2026-09-28 18:02:11 INFO    texel.agent: [gen 12] model call #3 → my-model (14 messages, ~9k chars)
+2026-09-28 18:02:29 INFO    texel.agent: [gen 12] model call #3 ← 18.4s: tools fill_rect, view_canvas | tokens 5210/312
+```
+
+- `LOG_LEVEL=DEBUG` also logs every tool call and its result.
+- `LOG_FILE=` (empty) logs to the terminal only.
+- While painting, if the model goes quiet, the UI shows "Still waiting for <model>..." every 30 seconds. It gives up after `AGENT_IDLE_TIMEOUT` seconds (default 300).
+- A `model call #N →` line with no matching `←` is the call that hung. When reporting a problem, include the last few dozen lines of `logs/texel.log`.
 
 ## Observability (Optional)
 

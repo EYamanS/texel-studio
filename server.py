@@ -10,10 +10,12 @@ import os
 import sys
 import json
 import time
+import logging
 import base64
 import io
 import sqlite3
 from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Optional, List
 
 from dotenv import load_dotenv
@@ -44,6 +46,10 @@ class AssessmentResponse(BaseModel):
 
 load_dotenv()
 load_dotenv(Path(__file__).parent.parent / "sprite-forge" / ".env")  # fallback to sprite-forge env
+
+from logging_setup import setup_logging
+setup_logging()
+logger = logging.getLogger("texel.server")
 
 # Set GOOGLE_APPLICATION_CREDENTIALS for LangChain/Vertex AI
 if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
@@ -78,10 +84,21 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODELS = [m.strip() for m in os.getenv("OLLAMA_MODELS", "").split(",") if m.strip()]
 ALL_MODELS = GEMINI_MODELS + OPENAI_MODELS + OPENAI_MODELS_CUSTOM + OLLAMA_MODELS
 DEFAULT_MODEL = "gemini-3-flash-preview"
-IMAGE_GEN_MODELS = [
+GEMINI_IMAGE_MODELS = [
     "gemini-3.1-flash-image-preview",
 ]
-DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image-preview"
+# OpenAI-compatible image model names (NanoGPT, OpenAI gpt-image-1, etc.) registered via env.
+# Requests go to OPENAI_IMAGE_BASE_URL — see _openai_image_endpoint().
+OPENAI_IMAGE_MODELS = [m.strip() for m in os.getenv("OPENAI_IMAGE_MODELS", "").split(",") if m.strip()]
+OPENAI_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE") or "1024x1024"
+IMAGE_GEN_MODELS = list(dict.fromkeys(GEMINI_IMAGE_MODELS + OPENAI_IMAGE_MODELS))
+DEFAULT_IMAGE_MODEL = OPENAI_IMAGE_MODELS[0] if OPENAI_IMAGE_MODELS else GEMINI_IMAGE_MODELS[0]
+IMAGE_REQUEST_TIMEOUT = 300  # seconds to wait for an OpenAI-compatible image response
+REFERENCE_MAX_PX = 512  # reference images are shrunk to this (longest side) before they're sent to the model
+# The UI's generation stream gives up after this many seconds without any agent step
+# (e.g. a hung model call); while waiting it reports progress every HEARTBEAT_SECONDS.
+AGENT_IDLE_TIMEOUT = int(os.getenv("AGENT_IDLE_TIMEOUT") or "300")
+HEARTBEAT_SECONDS = 30
 REFS_DIR = Path(__file__).parent / "references"
 REFS_DIR.mkdir(exist_ok=True)
 DB_PATH = Path(__file__).parent / "pixel_studio.db"
@@ -133,6 +150,126 @@ def gemini():
     if client is None:
         client = get_client()
     return client
+
+# ── Reference image providers ──
+
+def _gemini_image_bytes(model: str, prompt: str) -> bytes:
+    """Generate one image with Gemini and return its bytes."""
+    try:
+        # Try with response_modalities for Vertex AI
+        response = gemini().models.generate_content(
+            model=model,
+            contents=[prompt],
+            config=genai.types.GenerateContentConfig(
+                response_modalities=["Image", "Text"],
+            ),
+        )
+    except Exception:
+        # Fallback without response_modalities
+        response = gemini().models.generate_content(
+            model=model,
+            contents=[prompt],
+        )
+
+    def _part_bytes(part) -> bytes:
+        try:
+            buf = io.BytesIO()
+            part.as_image().save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception:
+            img_bytes = part.inline_data.data
+            if isinstance(img_bytes, str):
+                img_bytes = base64.b64decode(img_bytes)
+            return img_bytes
+
+    for part in response.parts or []:
+        if part.inline_data is not None:
+            return _part_bytes(part)
+
+    if hasattr(response, 'candidates') and response.candidates:
+        for candidate in response.candidates:
+            if hasattr(candidate, 'content') and candidate.content:
+                for part in candidate.content.parts:
+                    if hasattr(part, 'inline_data') and part.inline_data:
+                        return _part_bytes(part)
+
+    raise RuntimeError("No image in response. Model may not support image generation.")
+
+def _openai_image_endpoint() -> tuple[str, str | None]:
+    """Base URL and API key for OpenAI-compatible image requests."""
+    base_url = os.getenv("OPENAI_IMAGE_BASE_URL")
+    if base_url:
+        return base_url, os.getenv("OPENAI_IMAGE_API_KEY")
+    # No dedicated image endpoint — reuse the chat endpoint's base URL and key as a pair,
+    # so a key is never sent to a host it wasn't configured for.
+    return (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
+            os.getenv("OPENAI_IMAGE_API_KEY") or os.getenv("OPENAI_API_KEY"))
+
+def _openai_image_bytes(model: str, prompt: str) -> bytes:
+    """Generate one image via an OpenAI-compatible POST {base_url}/images/generations and return its bytes.
+
+    Plain urllib rather than the openai SDK: the SDK also attaches OPENAI_ORG_ID / OPENAI_PROJECT_ID /
+    OPENAI_CUSTOM_HEADERS from the environment, which must not leak to a third-party endpoint.
+    """
+    import urllib.error
+    import urllib.request
+    base_url, api_key = _openai_image_endpoint()
+    headers = {"Content-Type": "application/json", "User-Agent": "texel-studio/1.0"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    # No response_format: NanoGPT defaults to b64_json, and gpt-image-1 rejects the parameter.
+    body = json.dumps({"model": model, "prompt": prompt, "n": 1, "size": OPENAI_IMAGE_SIZE}).encode()
+    req = urllib.request.Request(f"{base_url.rstrip('/')}/images/generations", data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=IMAGE_REQUEST_TIMEOUT) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        try:
+            err = json.loads(detail).get("error")
+            detail = err.get("message", detail) if isinstance(err, dict) else (err or detail)
+        except Exception:
+            pass
+        raise RuntimeError(f"Image API returned HTTP {e.code}: {str(detail)[:500]}") from None
+    except (TimeoutError, urllib.error.URLError) as e:
+        if isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError):
+            raise RuntimeError(f"No response from {base_url} after {IMAGE_REQUEST_TIMEOUT}s (model {model})") from None
+        raise
+
+    item = (data.get("data") or [None])[0] or {}
+    logger.debug("Image response from %s: %s", model,
+                 "b64_json" if item.get("b64_json") else "url" if item.get("url") else f"no image ({list(data)})")
+    if item.get("b64_json"):
+        return base64.b64decode(item["b64_json"].split(",", 1)[-1])  # tolerate a data: URL prefix
+    if item.get("url"):
+        return _download_image_url(item["url"])
+    raise RuntimeError("No image in response. Model may not support image generation.")
+
+MAX_IMAGE_BYTES = 50 * 1024 * 1024
+
+def _download_image_url(url: str) -> bytes:
+    import urllib.parse
+    import urllib.request
+    # urllib would also open file:// (and friends) — only fetch remote or inline images.
+    if urllib.parse.urlparse(url).scheme not in ("http", "https", "data"):
+        raise RuntimeError(f"Refusing to download image from unsupported URL: {url[:100]}")
+    req = urllib.request.Request(url, headers={"User-Agent": "texel-studio/1.0"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        raw = resp.read(MAX_IMAGE_BYTES + 1)
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise RuntimeError(f"Image download exceeded {MAX_IMAGE_BYTES // (1024 * 1024)} MB")
+    return raw
+
+def _to_png(raw: bytes) -> bytes:
+    """References are served and sent to the agent as image/png — convert anything else (JPEG, WebP, ...)."""
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return raw
+    try:
+        buf = io.BytesIO()
+        Image.open(io.BytesIO(raw)).convert("RGBA").save(buf, format="PNG")
+    except Exception as e:
+        raise RuntimeError(f"Image model returned data that isn't a readable image: {e}") from None
+    return buf.getvalue()
 
 # ── Database ──
 
@@ -389,14 +526,56 @@ Create whatever the user describes in pixel art style.
 }
 
 def load_reference_b64(ref_id: str | None) -> str | None:
-    """Load a reference image as base64, if it exists."""
+    """Load a reference image as base64 for the model, shrunk to REFERENCE_MAX_PX on its longest side."""
     if not ref_id:
         return None
     import storage as _storage
     data = _storage.read_file(f"references/{ref_id}")
     if not data:
         return None
+    # Every model call re-sends the reference, and a full-size upload (a phone photo is 15-30 MB
+    # as PNG) makes each request huge. A small reference is plenty for 8-64 px pixel art.
+    try:
+        img = Image.open(io.BytesIO(data))
+        if max(img.size) > REFERENCE_MAX_PX:
+            original = f"{img.width}x{img.height}, {len(data) / 1e6:.1f} MB"
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA")
+            img.thumbnail((REFERENCE_MAX_PX, REFERENCE_MAX_PX))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            data = buf.getvalue()
+            logger.info("Reference %s: %s → sending %dx%d, %.1f MB", ref_id, original, img.width, img.height,
+                        len(data) / 1e6)
+    except Exception:
+        logger.warning("Reference %s isn't a readable image; sending it as-is", ref_id)
     return base64.b64encode(data).decode()
+
+def create_reference(prompt: str, feedback: str | None = None, model: str | None = None,
+                     sprite_type: str = "block") -> str:
+    """Generate a concept-art reference image, save it, and return its reference_id."""
+    import storage as _storage
+    type_config = SPRITE_TYPES.get(sprite_type, SPRITE_TYPES["block"])
+    ref_prompt = f"{prompt}\n\n{type_config['ref_prompt']}"
+    if feedback:
+        ref_prompt += f"\n\nRevision feedback: {feedback}"
+
+    img_model = model if model in IMAGE_GEN_MODELS else DEFAULT_IMAGE_MODEL
+    # Explicitly configured OpenAI-compatible names win, even if they shadow a Gemini model name.
+    use_openai = img_model in OPENAI_IMAGE_MODELS
+    logger.info("Concept art: %s via %s (%s, prompt %r)", img_model,
+                _openai_image_endpoint()[0] if use_openai else "Gemini", sprite_type, prompt[:80])
+    started = time.monotonic()
+    try:
+        raw = _openai_image_bytes(img_model, ref_prompt) if use_openai else _gemini_image_bytes(img_model, ref_prompt)
+        png = _to_png(raw)
+        ref_id = f"ref_{int(time.time())}_{hash(prompt) & 0xFFFF:04x}.png"
+        _storage.save_file(f"references/{ref_id}", png)
+    except Exception:
+        logger.exception("Concept art with %s failed after %.1fs", img_model, time.monotonic() - started)
+        raise
+    logger.info("Concept art ready in %.1fs: %s (%d KB)", time.monotonic() - started, ref_id, len(png) // 1024)
+    return ref_id
 
 def render_grid_overlay(img: Image.Image) -> Image.Image:
     """Add coordinate numbers to an upscaled image for AI position reference."""
@@ -579,9 +758,11 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
     event_queue = queue_mod.Queue()
     step_count = [0]
     last_pixel_step = [0]
+    last_step = ["agent starting"]
 
     def on_step(canvas, step_type, msg):
         step_count[0] += 1
+        last_step[0] = f"{step_type}: {msg[:100]}"
         event_queue.put(sse_event("log", {"step": f"{step_type}_{step_count[0]}", "message": msg}))
 
         # Send pixel snapshots on tool_result (AFTER execution, canvas is updated)
@@ -634,6 +815,7 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
             event_queue.put(sse_event("complete", {"id": generation_id, "image_path": filename}))
 
         except Exception as e:
+            logger.exception("[gen %s] agent failed with %s", generation_id, model)
             db2 = get_db()
             db2.execute("UPDATE generations SET status = 'error' WHERE id = ?", (generation_id,))
             db2.execute("INSERT INTO generation_logs (generation_id, step, message) VALUES (?, ?, ?)",
@@ -647,21 +829,67 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
     t = threading.Thread(target=worker, daemon=True)
     t.start()
 
+    # Poll in short slices so a slow or hung model call shows up as "still waiting"
+    # (in the server log and the UI) instead of minutes of silence.
+    poll = min(HEARTBEAT_SECONDS, AGENT_IDLE_TIMEOUT)
+    idle = 0
     while True:
         try:
-            ev = event_queue.get(timeout=300)  # 5 min per event
-            if ev is None:
-                break
-            yield ev
+            ev = event_queue.get(timeout=poll)
         except queue_mod.Empty:
-            yield sse_event("error", {"message": "Agent timed out (5 min without response)"})
+            idle += poll
+            if idle >= AGENT_IDLE_TIMEOUT:
+                logger.error("[gen %s] no agent activity for %ds with %s, giving up (last step: %s)",
+                             generation_id, idle, model, last_step[0])
+                yield sse_event("error", {"message": f"Agent timed out ({idle}s without a response from {model}). "
+                                                     "The server log has details."})
+                break
+            logger.warning("[gen %s] no agent activity for %ds, still waiting on %s (last step: %s)",
+                           generation_id, idle, model, last_step[0])
+            yield sse_event("log", {"step": "waiting", "message": f"Still waiting for {model}... ({idle}s)"})
+            continue
+        idle = 0
+        if ev is None:
             break
+        yield ev
 
     db.close()
 
 # ── FastAPI ──
 
-app = FastAPI(title="Texel Studio")
+def log_startup_summary() -> None:
+    """Log what's configured, so .env mistakes show up at startup. Never logs key values."""
+    import logging_setup
+
+    if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+        gemini_auth = "API key"
+    elif os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        gemini_auth = "service account"
+    else:
+        gemini_auth = "not configured"
+    logger.info("Gemini: %s", gemini_auth)
+    if os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_BASE_URL") or OPENAI_MODELS_CUSTOM:
+        logger.info("OpenAI-compatible chat: %s (%s), extra models: %s",
+                    os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
+                    "key set" if os.getenv("OPENAI_API_KEY") else "no key",
+                    ", ".join(OPENAI_MODELS_CUSTOM) or "none")
+    if OLLAMA_MODELS:
+        logger.info("Ollama: %s, models: %s", OLLAMA_URL, ", ".join(OLLAMA_MODELS))
+    logger.info("Concept-art models: %s (default %s)", ", ".join(IMAGE_GEN_MODELS), DEFAULT_IMAGE_MODEL)
+    if OPENAI_IMAGE_MODELS:
+        base_url, api_key = _openai_image_endpoint()
+        logger.info("OpenAI-compatible images: %s (%s)", base_url, "key set" if api_key else "no key")
+    logger.info("Queue: %s | agent idle timeout: %ds | log level %s, file %s",
+                "Redis" if REDIS_URL else "in-process", AGENT_IDLE_TIMEOUT,
+                logging.getLevelName(logging.getLogger("texel").getEffectiveLevel()),
+                logging_setup.log_file or "off")
+
+@asynccontextmanager
+async def lifespan(app):
+    log_startup_summary()
+    yield
+
+app = FastAPI(title="Texel Studio", lifespan=lifespan)
 
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
@@ -791,59 +1019,11 @@ def generate_reference(data: ReferenceRequest):
         return result
 
     try:
-        type_config = SPRITE_TYPES.get(data.sprite_type, SPRITE_TYPES["block"])
-        ref_prompt = f"{data.prompt}\n\n{type_config['ref_prompt']}"
-        if data.feedback:
-            ref_prompt += f"\n\nRevision feedback: {data.feedback}"
-
-        img_model = data.model if data.model in IMAGE_GEN_MODELS else DEFAULT_IMAGE_MODEL
-        try:
-            # Try with response_modalities for Vertex AI
-            response = gemini().models.generate_content(
-                model=img_model,
-                contents=[ref_prompt],
-                config=genai.types.GenerateContentConfig(
-                    response_modalities=["Image", "Text"],
-                ),
-            )
-        except Exception:
-            # Fallback without response_modalities
-            response = gemini().models.generate_content(
-                model=img_model,
-                contents=[ref_prompt],
-            )
-
-        import storage as _storage
-
-        def _save_ref_part(part):
-            ref_id = f"ref_{int(time.time())}_{hash(data.prompt) & 0xFFFF:04x}.png"
-            try:
-                buf = io.BytesIO()
-                part.as_image().save(buf, format="PNG")
-                _storage.save_file(f"references/{ref_id}", buf.getvalue())
-            except Exception:
-                img_bytes = part.inline_data.data
-                if isinstance(img_bytes, str):
-                    img_bytes = base64.b64decode(img_bytes)
-                _storage.save_file(f"references/{ref_id}", img_bytes)
-            return ref_id
-
-        for part in response.parts:
-            if part.inline_data is not None:
-                return {"reference_id": _save_ref_part(part)}
-
-        if hasattr(response, 'candidates') and response.candidates:
-            for candidate in response.candidates:
-                if hasattr(candidate, 'content') and candidate.content:
-                    for part in candidate.content.parts:
-                        if hasattr(part, 'inline_data') and part.inline_data:
-                            return {"reference_id": _save_ref_part(part)}
-
-        return JSONResponse({"error": "No image in response. Model may not support image generation."}, status_code=500)
+        ref_id = create_reference(data.prompt, feedback=data.feedback, model=data.model, sprite_type=data.sprite_type)
+        return {"reference_id": ref_id}
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        print(f"[REFERENCE ERROR]\n{tb}")
         return JSONResponse({"error": f"{str(e)}\n\n{tb}"}, status_code=500)
 
 @app.post("/api/reference/upload")
@@ -867,13 +1047,16 @@ async def upload_reference(request: Request):
     ref_id = f"ref_{int(time.time())}_{hash(data) & 0xFFFF:04x}.png"
 
     # Convert to PNG if needed
+    dims = "not a readable image, saved as-is"
     try:
         img = Image.open(io.BytesIO(data))
         img.save(REFS_DIR / ref_id, "PNG")
+        dims = f"{img.width}x{img.height}"
     except Exception:
         # Save raw if it's already a valid image format
         with open(REFS_DIR / ref_id, "wb") as f:
             f.write(data)
+    logger.info("Reference uploaded: %s, %s, %.1f MB", ref_id, dims, (REFS_DIR / ref_id).stat().st_size / 1e6)
 
     return {"reference_id": ref_id}
 
@@ -938,7 +1121,7 @@ async def start_generation(data: GenerateRequest):
         raise HTTPException(400, "Colors array is required")
 
     db = get_db()
-    model = data.model if data.model in GEMINI_MODELS else DEFAULT_MODEL
+    model = data.model if data.model in ALL_MODELS else DEFAULT_MODEL
     cur = db.execute(
         "INSERT INTO generations (prompt, system_prompt, colors, size, model, reference_id, sprite_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (data.prompt, data.system_prompt, json.dumps(data.colors), data.size, model, data.reference_id, data.sprite_type),
@@ -1180,4 +1363,5 @@ app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8500"))
-    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=os.getenv("RAILWAY_ENVIRONMENT") is None)
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=os.getenv("RAILWAY_ENVIRONMENT") is None,
+                log_config=None)

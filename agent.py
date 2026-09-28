@@ -9,16 +9,21 @@ Supports continuation — send follow-up messages to the same agent thread.
 import json
 import base64
 import io
+import logging
+import time
 import uuid
 from typing import Any
 
 from PIL import Image
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
 import os
+
+logger = logging.getLogger("texel.agent")
 
 
 # ── Checkpointer factory ──
@@ -80,6 +85,67 @@ def _get_posthog_callback(distinct_id: str | None = None, trace_id: str | None =
         )
     except Exception:
         return None
+
+
+# ── Run logging ──
+
+def _message_size(messages) -> tuple[int, int, int]:
+    """Approximate text size, image count and inline image bytes of a model request."""
+    chars = images = image_bytes = 0
+    for m in messages:
+        for part in (m.content if isinstance(m.content, list) else [m.content]):
+            if isinstance(part, dict) and part.get("type") in ("image_url", "image"):
+                images += 1
+                image_bytes += len(str(part.get("image_url") or part))
+            else:
+                chars += len(part.get("text", "") if isinstance(part, dict) else str(part))
+    return chars, images, image_bytes
+
+
+class AgentLogHandler(BaseCallbackHandler):
+    """Logs every model call and tool call of one agent run, with timings.
+
+    A model call that never returns shows up as a "model call #N →" line with no matching "←".
+    """
+
+    def __init__(self, gen_id, model_name: str):
+        self.gen_id = gen_id
+        self.model_name = model_name
+        self.calls = 0
+        self._started: dict = {}  # run_id -> (call number, start time)
+
+    def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs):
+        self.calls += 1
+        self._started[run_id] = (self.calls, time.monotonic())
+        msgs = messages[0] if messages else []
+        chars, images, image_bytes = _message_size(msgs)
+        logger.info("[gen %s] model call #%d → %s (%d messages, ~%dk chars%s)", self.gen_id, self.calls,
+                    self.model_name, len(msgs), chars // 1000,
+                    f", {images} image(s) {image_bytes / 1e6:.1f} MB" if images else "")
+
+    def on_llm_end(self, response, *, run_id, **kwargs):
+        n, started = self._started.pop(run_id, (self.calls, time.monotonic()))
+        gens = response.generations[0] if response.generations else []
+        msg = getattr(gens[0], "message", None) if gens else None
+        tools = [tc["name"] for tc in (getattr(msg, "tool_calls", None) or [])]
+        usage = getattr(msg, "usage_metadata", None) or {}
+        tokens = f" | tokens {usage.get('input_tokens')}/{usage.get('output_tokens')}" if usage else ""
+        logger.info("[gen %s] model call #%d ← %.1fs: %s%s", self.gen_id, n, time.monotonic() - started,
+                    f"tools {', '.join(tools)}" if tools else "text reply", tokens)
+
+    def on_llm_error(self, error, *, run_id, **kwargs):
+        n, started = self._started.pop(run_id, (self.calls, time.monotonic()))
+        logger.error("[gen %s] model call #%d failed after %.1fs: %s", self.gen_id, n,
+                     time.monotonic() - started, error)
+
+    def on_tool_start(self, serialized, input_str, *, run_id, **kwargs):
+        logger.debug("[gen %s] tool %s %s", self.gen_id, (serialized or {}).get("name", "?"), input_str[:200])
+
+    def on_tool_end(self, output, *, run_id, **kwargs):
+        logger.debug("[gen %s] tool result: %s", self.gen_id, str(getattr(output, "content", output))[:200])
+
+    def on_tool_error(self, error, *, run_id, **kwargs):
+        logger.warning("[gen %s] tool failed: %s", self.gen_id, error)
 
 
 # ── Canvas State ──
@@ -548,6 +614,7 @@ def _get_llm(model_name: str, temperature: float = 0.7):
     # Ollama models (OpenAI-compatible API)
     if model_name in OLLAMA_MODELS:
         from langchain_openai import ChatOpenAI
+        logger.info("Model %s via Ollama at %s", model_name, OLLAMA_URL)
         return ChatOpenAI(
             model=model_name,
             temperature=temperature,
@@ -565,11 +632,15 @@ def _get_llm(model_name: str, temperature: float = 0.7):
             # still expects something — fall back to a placeholder if OPENAI_API_KEY is unset.
             if not os.getenv("OPENAI_API_KEY"):
                 kwargs["api_key"] = "not-needed"
+        logger.info("Model %s via OpenAI-compatible API at %s (%s)", model_name,
+                    OPENAI_BASE_URL or "https://api.openai.com/v1",
+                    "key set" if os.getenv("OPENAI_API_KEY") else "no key")
         return ChatOpenAI(**kwargs)
 
     # Gemini via API key
     if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
         from langchain_google_genai import ChatGoogleGenerativeAI
+        logger.info("Model %s via Gemini API", model_name)
         return ChatGoogleGenerativeAI(model=model_name, temperature=temperature)
 
     # Gemini via Vertex AI (service account)
@@ -580,6 +651,11 @@ def _get_llm(model_name: str, temperature: float = 0.7):
     if sa_path and os.path.exists(sa_path):
         with open(sa_path) as f:
             project = _json.load(f).get("project_id")
+        logger.info("Model %s via Vertex AI (project %s)", model_name, project)
+    else:
+        logger.warning("Model %s goes to Vertex AI with no GEMINI_API_KEY or service account file, so it only "
+                       "works with Google application-default credentials. Pick one of your OPENAI_MODELS / "
+                       "OLLAMA_MODELS in the model dropdown, or set GEMINI_API_KEY.", model_name)
     return ChatVertexAI(
         model_name=model_name,
         temperature=temperature,
@@ -741,6 +817,11 @@ def run_agent_stream(
     is_new = not thread_exists(gen_id)
     thread_id = _thread_id_for(gen_id)
 
+    started = time.monotonic()
+    logger.info("[gen %s] agent %s: %s, %dx%d %s, reference %s", gen_id, "start" if is_new else "continues",
+                model_name, size, size, sprite_type,
+                f"{len(reference_b64) / 1e6:.1f} MB" if reference_b64 else "none")
+
     vision = _is_vision_model(model_name)
     full_toolset = vision  # small local models get the simplified toolset
     tools = make_tools(canvas, vision=vision, full_toolset=full_toolset)
@@ -770,15 +851,16 @@ USER REQUEST: {message}
 Use the canvas tools to make the requested changes. Call finish when done."""
         input_message = HumanMessage(content=follow_up)
 
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": thread_id}, "callbacks": [AgentLogHandler(gen_id, model_name)]}
 
     # Add PostHog callback if configured
     ph_callback = _get_posthog_callback(distinct_id=str(gen_id), trace_id=f"gen_{gen_id}")
     if ph_callback:
-        config["callbacks"] = [ph_callback]
+        config["callbacks"].append(ph_callback)
 
     step_count = 0
     finished = False
+    stop_reason = "model stopped calling tools"
 
     # Consume the full stream — don't break early to avoid GeneratorExit in LangSmith
     for chunk in agent.stream(
@@ -795,6 +877,7 @@ Use the canvas tools to make the requested changes. Call finish when done."""
             try:
                 if cancel_check():
                     finished = True
+                    stop_reason = "canceled"
                     if on_step:
                         on_step(canvas, "canceled", "Job canceled by user")
                     continue
@@ -818,13 +901,17 @@ Use the canvas tools to make the requested changes. Call finish when done."""
                     content = msg.content.strip()
                     if "FINISHED" in (msg.content or ""):
                         finished = True
+                        stop_reason = "finish tool"
                     # Tool results come from the "tools" node — canvas has been updated
                     if node_name == "tools" and on_step:
                         on_step(canvas, "tool_result", content[:200])
                     elif content and on_step:
                         on_step(canvas, "thought", content[:200])
 
-                if step_count >= max_steps:
+                if step_count >= max_steps and not finished:
                     finished = True
+                    stop_reason = f"max steps ({max_steps})"
 
+    logger.info("[gen %s] agent done in %.1fs: %d steps, %s", gen_id, time.monotonic() - started,
+                step_count, stop_reason)
     return canvas

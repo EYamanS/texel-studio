@@ -17,12 +17,15 @@ handler can use it without re-implementing thread management.
 
 from __future__ import annotations
 
+import logging
 import queue as queue_mod
 import threading
 import traceback
 from typing import Any, Callable, Iterator
 
 from . import Event, error
+
+logger = logging.getLogger("texel.jobs")
 
 
 class _Sentinel:
@@ -56,6 +59,7 @@ class EventBridge:
             try:
                 ev = self._q.get(timeout=self._timeout)
             except queue_mod.Empty:
+                logger.error("Job handler produced no events for %ss, giving up", self._timeout)
                 yield error(f"Handler timed out (no events for {self._timeout}s)")
                 return
             if ev is _DONE:
@@ -74,7 +78,7 @@ def run_in_thread(target: Callable[[], Any], bridge: EventBridge) -> threading.T
         try:
             target()
         except Exception as e:
-            traceback.print_exc()
+            logger.exception("Job handler failed")
             bridge.emit(error(str(e), traceback=traceback.format_exc()))
         finally:
             bridge.finish()
