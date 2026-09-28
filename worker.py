@@ -12,6 +12,7 @@ Requires REDIS_URL environment variable.
 import os
 import sys
 import json
+import logging
 import time
 import uuid
 import signal
@@ -21,13 +22,17 @@ from dotenv import load_dotenv
 load_dotenv()
 load_dotenv(Path(__file__).parent.parent / "sprite-forge" / ".env")
 
+from logging_setup import setup_logging
+setup_logging()
+logger = logging.getLogger("texel.worker")
+
 import redis
 
 from server import (
     sse_event, load_reference_b64, upscale_image, pixels_to_image,
     SPRITE_TYPES, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT,
     create_reference,
-    gemini,
+    gemini, log_startup_summary,
 )
 import storage
 from agent import run_agent_stream as agent_run
@@ -49,7 +54,7 @@ running = True
 
 def handle_signal(sig, frame):
     global running
-    print(f"[{WORKER_ID}] Shutting down...")
+    logger.info("[%s] Shutting down...", WORKER_ID)
     running = False
 
 signal.signal(signal.SIGINT, handle_signal)
@@ -152,13 +157,12 @@ def handle_generate(job: dict):
                     },
                 )
                 urllib.request.urlopen(req, timeout=30)
-                print(f"[{WORKER_ID}] Webhook OK for {external_id}")
+                logger.info("[%s] Webhook OK for %s", WORKER_ID, external_id)
             except Exception as we:
-                print(f"[{WORKER_ID}] Webhook failed for {external_id}: {we}")
+                logger.warning("[%s] Webhook failed for %s: %s", WORKER_ID, external_id, we)
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.exception("[%s] Generation %s failed", WORKER_ID, gen_id)
         publish_event(job_id, sse_event("error", {"message": str(e)}))
 
         # Notify cloud webhook of error too
@@ -199,8 +203,7 @@ def handle_reference(job: dict):
         r.publish(f"texel:result:{job_id}", json.dumps({"reference_id": ref_id}))
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.error("[%s] Reference job %s failed: %s", WORKER_ID, job_id, e)
         r.publish(f"texel:result:{job_id}", json.dumps({"error": str(e)}))
 
 
@@ -248,8 +251,7 @@ def handle_generic_job(job: dict):
             terminal = {"status": "error", "error_message": "Handler exited without result"}
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.exception("[%s] Job %s (%s) failed", WORKER_ID, job_id, kind)
         publish_event(job_id, event_to_sse(_event("error", {"message": str(e)})))
         terminal = {"status": "error", "error_message": str(e)}
 
@@ -271,9 +273,9 @@ def handle_generic_job(job: dict):
                 },
             )
             urllib.request.urlopen(req, timeout=30)
-            print(f"[{WORKER_ID}] Webhook OK for {external_id} ({kind})")
+            logger.info("[%s] Webhook OK for %s (%s)", WORKER_ID, external_id, kind)
         except Exception as we:
-            print(f"[{WORKER_ID}] Webhook failed for {external_id}: {we}")
+            logger.warning("[%s] Webhook failed for %s: %s", WORKER_ID, external_id, we)
 
 
 def _event(name: str, data: dict):
@@ -283,7 +285,8 @@ def _event(name: str, data: dict):
 
 
 def main_loop():
-    print(f"[{WORKER_ID}] Worker started, listening for jobs...")
+    log_startup_summary()
+    logger.info("[%s] Worker started, listening for jobs...", WORKER_ID)
 
     while running:
         try:
@@ -298,7 +301,7 @@ def main_loop():
             job = json.loads(job_data)
             job_type = job.get("type", "generate")
 
-            print(f"[{WORKER_ID}] Processing {job_type} job: {job.get('job_id', '?')}")
+            logger.info("[%s] Processing %s job: %s", WORKER_ID, job_type, job.get("job_id", "?"))
 
             if job_type == "job":
                 # New generic shape: {type: "job", kind, job_id, external_id, params}
@@ -308,18 +311,16 @@ def main_loop():
             elif job_type == "reference":
                 handle_reference(job)
             else:
-                print(f"[{WORKER_ID}] Unknown job type: {job_type}")
+                logger.warning("[%s] Unknown job type: %s", WORKER_ID, job_type)
 
         except redis.ConnectionError:
-            print(f"[{WORKER_ID}] Redis connection lost, retrying in 5s...")
+            logger.warning("[%s] Redis connection lost, retrying in 5s...", WORKER_ID)
             time.sleep(5)
         except Exception as e:
-            print(f"[{WORKER_ID}] Error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("[%s] Error: %s", WORKER_ID, e)
             time.sleep(1)
 
-    print(f"[{WORKER_ID}] Worker stopped.")
+    logger.info("[%s] Worker stopped.", WORKER_ID)
 
 
 if __name__ == "__main__":

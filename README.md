@@ -237,6 +237,20 @@ Built-in kinds:
 
 `GET /api/jobs/kinds` returns the list at runtime.
 
+## Logs & troubleshooting
+
+The engine logs to the terminal and to `logs/texel.log` (rotated at 5 MB). At startup it lists which providers are configured, but never the keys. While it runs, it logs every concept-art request and every model call, with timings:
+
+```
+2026-09-28 18:02:11 INFO    texel.agent: [gen 12] model call #3 → my-model (14 messages, ~9k chars)
+2026-09-28 18:02:29 INFO    texel.agent: [gen 12] model call #3 ← 18.4s: tools fill_rect, view_canvas | tokens 5210/312
+```
+
+- `LOG_LEVEL=DEBUG` also logs every tool call and its result.
+- `LOG_FILE=` (empty) logs to the terminal only.
+- While painting, if the model goes quiet, the UI shows "Still waiting for <model>..." every 30 seconds. It gives up after `AGENT_IDLE_TIMEOUT` seconds (default 300).
+- A `model call #N →` line with no matching `←` is the call that hung. When reporting a problem, include the last few dozen lines of `logs/texel.log`.
+
 ## Observability (Optional)
 
 **LangSmith** — LangChain's tracing platform:

@@ -21,6 +21,7 @@ the in-process path with the new dispatcher.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from typing import Any, Iterator
@@ -32,6 +33,7 @@ from pydantic import BaseModel, ValidationError
 from . import Event, JobContext, get_handler, list_kinds, parse_params
 
 router = APIRouter()
+logger = logging.getLogger("texel.jobs")
 
 
 # ── Cancel coordination ──
@@ -156,6 +158,7 @@ def _stream_inline(kind: str, params: BaseModel, ctx: JobContext) -> Iterator[st
         for ev in handler.run(params, ctx):
             yield event_to_sse(ev)
     except Exception as e:
+        logger.exception("Job %s (%s) failed", ctx.job_id, kind)
         yield event_to_sse(Event(name="error", data={"message": str(e)}))
 
 

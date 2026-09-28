@@ -3,6 +3,7 @@ __pycache__/
 *.db
 output/
 references/
+logs/
 .env
 service-account.json
 

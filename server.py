@@ -10,10 +10,12 @@ import os
 import sys
 import json
 import time
+import logging
 import base64
 import io
 import sqlite3
 from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Optional, List
 
 from dotenv import load_dotenv
@@ -44,6 +46,10 @@ class AssessmentResponse(BaseModel):
 
 load_dotenv()
 load_dotenv(Path(__file__).parent.parent / "sprite-forge" / ".env")  # fallback to sprite-forge env
+
+from logging_setup import setup_logging
+setup_logging()
+logger = logging.getLogger("texel.server")
 
 # Set GOOGLE_APPLICATION_CREDENTIALS for LangChain/Vertex AI
 if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
@@ -87,6 +93,11 @@ OPENAI_IMAGE_MODELS = [m.strip() for m in os.getenv("OPENAI_IMAGE_MODELS", "").s
 OPENAI_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE") or "1024x1024"
 IMAGE_GEN_MODELS = list(dict.fromkeys(GEMINI_IMAGE_MODELS + OPENAI_IMAGE_MODELS))
 DEFAULT_IMAGE_MODEL = OPENAI_IMAGE_MODELS[0] if OPENAI_IMAGE_MODELS else GEMINI_IMAGE_MODELS[0]
+IMAGE_REQUEST_TIMEOUT = 300  # seconds to wait for an OpenAI-compatible image response
+# The UI's generation stream gives up after this many seconds without any agent step
+# (e.g. a hung model call); while waiting it reports progress every HEARTBEAT_SECONDS.
+AGENT_IDLE_TIMEOUT = int(os.getenv("AGENT_IDLE_TIMEOUT") or "300")
+HEARTBEAT_SECONDS = 30
 REFS_DIR = Path(__file__).parent / "references"
 REFS_DIR.mkdir(exist_ok=True)
 DB_PATH = Path(__file__).parent / "pixel_studio.db"
@@ -209,7 +220,7 @@ def _openai_image_bytes(model: str, prompt: str) -> bytes:
     body = json.dumps({"model": model, "prompt": prompt, "n": 1, "size": OPENAI_IMAGE_SIZE}).encode()
     req = urllib.request.Request(f"{base_url.rstrip('/')}/images/generations", data=body, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=IMAGE_REQUEST_TIMEOUT) as resp:
             data = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")
@@ -219,8 +230,14 @@ def _openai_image_bytes(model: str, prompt: str) -> bytes:
         except Exception:
             pass
         raise RuntimeError(f"Image API returned HTTP {e.code}: {str(detail)[:500]}") from None
+    except (TimeoutError, urllib.error.URLError) as e:
+        if isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError):
+            raise RuntimeError(f"No response from {base_url} after {IMAGE_REQUEST_TIMEOUT}s (model {model})") from None
+        raise
 
     item = (data.get("data") or [None])[0] or {}
+    logger.debug("Image response from %s: %s", model,
+                 "b64_json" if item.get("b64_json") else "url" if item.get("url") else f"no image ({list(data)})")
     if item.get("b64_json"):
         return base64.b64decode(item["b64_json"].split(",", 1)[-1])  # tolerate a data: URL prefix
     if item.get("url"):
@@ -528,13 +545,19 @@ def create_reference(prompt: str, feedback: str | None = None, model: str | None
 
     img_model = model if model in IMAGE_GEN_MODELS else DEFAULT_IMAGE_MODEL
     # Explicitly configured OpenAI-compatible names win, even if they shadow a Gemini model name.
-    if img_model in OPENAI_IMAGE_MODELS:
-        raw = _openai_image_bytes(img_model, ref_prompt)
-    else:
-        raw = _gemini_image_bytes(img_model, ref_prompt)
-
-    ref_id = f"ref_{int(time.time())}_{hash(prompt) & 0xFFFF:04x}.png"
-    _storage.save_file(f"references/{ref_id}", _to_png(raw))
+    use_openai = img_model in OPENAI_IMAGE_MODELS
+    logger.info("Concept art: %s via %s (%s, prompt %r)", img_model,
+                _openai_image_endpoint()[0] if use_openai else "Gemini", sprite_type, prompt[:80])
+    started = time.monotonic()
+    try:
+        raw = _openai_image_bytes(img_model, ref_prompt) if use_openai else _gemini_image_bytes(img_model, ref_prompt)
+        png = _to_png(raw)
+        ref_id = f"ref_{int(time.time())}_{hash(prompt) & 0xFFFF:04x}.png"
+        _storage.save_file(f"references/{ref_id}", png)
+    except Exception:
+        logger.exception("Concept art with %s failed after %.1fs", img_model, time.monotonic() - started)
+        raise
+    logger.info("Concept art ready in %.1fs: %s (%d KB)", time.monotonic() - started, ref_id, len(png) // 1024)
     return ref_id
 
 def render_grid_overlay(img: Image.Image) -> Image.Image:
@@ -718,9 +741,11 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
     event_queue = queue_mod.Queue()
     step_count = [0]
     last_pixel_step = [0]
+    last_step = ["agent starting"]
 
     def on_step(canvas, step_type, msg):
         step_count[0] += 1
+        last_step[0] = f"{step_type}: {msg[:100]}"
         event_queue.put(sse_event("log", {"step": f"{step_type}_{step_count[0]}", "message": msg}))
 
         # Send pixel snapshots on tool_result (AFTER execution, canvas is updated)
@@ -773,6 +798,7 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
             event_queue.put(sse_event("complete", {"id": generation_id, "image_path": filename}))
 
         except Exception as e:
+            logger.exception("[gen %s] agent failed with %s", generation_id, model)
             db2 = get_db()
             db2.execute("UPDATE generations SET status = 'error' WHERE id = ?", (generation_id,))
             db2.execute("INSERT INTO generation_logs (generation_id, step, message) VALUES (?, ?, ?)",
@@ -786,21 +812,67 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
     t = threading.Thread(target=worker, daemon=True)
     t.start()
 
+    # Poll in short slices so a slow or hung model call shows up as "still waiting"
+    # (in the server log and the UI) instead of minutes of silence.
+    poll = min(HEARTBEAT_SECONDS, AGENT_IDLE_TIMEOUT)
+    idle = 0
     while True:
         try:
-            ev = event_queue.get(timeout=300)  # 5 min per event
-            if ev is None:
-                break
-            yield ev
+            ev = event_queue.get(timeout=poll)
         except queue_mod.Empty:
-            yield sse_event("error", {"message": "Agent timed out (5 min without response)"})
+            idle += poll
+            if idle >= AGENT_IDLE_TIMEOUT:
+                logger.error("[gen %s] no agent activity for %ds with %s, giving up (last step: %s)",
+                             generation_id, idle, model, last_step[0])
+                yield sse_event("error", {"message": f"Agent timed out ({idle}s without a response from {model}). "
+                                                     "The server log has details."})
+                break
+            logger.warning("[gen %s] no agent activity for %ds, still waiting on %s (last step: %s)",
+                           generation_id, idle, model, last_step[0])
+            yield sse_event("log", {"step": "waiting", "message": f"Still waiting for {model}... ({idle}s)"})
+            continue
+        idle = 0
+        if ev is None:
             break
+        yield ev
 
     db.close()
 
 # ── FastAPI ──
 
-app = FastAPI(title="Texel Studio")
+def log_startup_summary() -> None:
+    """Log what's configured, so .env mistakes show up at startup. Never logs key values."""
+    import logging_setup
+
+    if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+        gemini_auth = "API key"
+    elif os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        gemini_auth = "service account"
+    else:
+        gemini_auth = "not configured"
+    logger.info("Gemini: %s", gemini_auth)
+    if os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_BASE_URL") or OPENAI_MODELS_CUSTOM:
+        logger.info("OpenAI-compatible chat: %s (%s), extra models: %s",
+                    os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
+                    "key set" if os.getenv("OPENAI_API_KEY") else "no key",
+                    ", ".join(OPENAI_MODELS_CUSTOM) or "none")
+    if OLLAMA_MODELS:
+        logger.info("Ollama: %s, models: %s", OLLAMA_URL, ", ".join(OLLAMA_MODELS))
+    logger.info("Concept-art models: %s (default %s)", ", ".join(IMAGE_GEN_MODELS), DEFAULT_IMAGE_MODEL)
+    if OPENAI_IMAGE_MODELS:
+        base_url, api_key = _openai_image_endpoint()
+        logger.info("OpenAI-compatible images: %s (%s)", base_url, "key set" if api_key else "no key")
+    logger.info("Queue: %s | agent idle timeout: %ds | log level %s, file %s",
+                "Redis" if REDIS_URL else "in-process", AGENT_IDLE_TIMEOUT,
+                logging.getLevelName(logging.getLogger("texel").getEffectiveLevel()),
+                logging_setup.log_file or "off")
+
+@asynccontextmanager
+async def lifespan(app):
+    log_startup_summary()
+    yield
+
+app = FastAPI(title="Texel Studio", lifespan=lifespan)
 
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
@@ -935,7 +1007,6 @@ def generate_reference(data: ReferenceRequest):
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        print(f"[REFERENCE ERROR]\n{tb}")
         return JSONResponse({"error": f"{str(e)}\n\n{tb}"}, status_code=500)
 
 @app.post("/api/reference/upload")
@@ -1272,4 +1343,5 @@ app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8500"))
-    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=os.getenv("RAILWAY_ENVIRONMENT") is None)
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=os.getenv("RAILWAY_ENVIRONMENT") is None,
+                log_config=None)
