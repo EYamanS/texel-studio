@@ -94,6 +94,7 @@ OPENAI_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE") or "1024x1024"
 IMAGE_GEN_MODELS = list(dict.fromkeys(GEMINI_IMAGE_MODELS + OPENAI_IMAGE_MODELS))
 DEFAULT_IMAGE_MODEL = OPENAI_IMAGE_MODELS[0] if OPENAI_IMAGE_MODELS else GEMINI_IMAGE_MODELS[0]
 IMAGE_REQUEST_TIMEOUT = 300  # seconds to wait for an OpenAI-compatible image response
+REFERENCE_MAX_PX = 512  # reference images are shrunk to this (longest side) before they're sent to the model
 # The UI's generation stream gives up after this many seconds without any agent step
 # (e.g. a hung model call); while waiting it reports progress every HEARTBEAT_SECONDS.
 AGENT_IDLE_TIMEOUT = int(os.getenv("AGENT_IDLE_TIMEOUT") or "300")
@@ -525,13 +526,29 @@ Create whatever the user describes in pixel art style.
 }
 
 def load_reference_b64(ref_id: str | None) -> str | None:
-    """Load a reference image as base64, if it exists."""
+    """Load a reference image as base64 for the model, shrunk to REFERENCE_MAX_PX on its longest side."""
     if not ref_id:
         return None
     import storage as _storage
     data = _storage.read_file(f"references/{ref_id}")
     if not data:
         return None
+    # Every model call re-sends the reference, and a full-size upload (a phone photo is 15-30 MB
+    # as PNG) makes each request huge. A small reference is plenty for 8-64 px pixel art.
+    try:
+        img = Image.open(io.BytesIO(data))
+        if max(img.size) > REFERENCE_MAX_PX:
+            original = f"{img.width}x{img.height}, {len(data) / 1e6:.1f} MB"
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA")
+            img.thumbnail((REFERENCE_MAX_PX, REFERENCE_MAX_PX))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            data = buf.getvalue()
+            logger.info("Reference %s: %s → sending %dx%d, %.1f MB", ref_id, original, img.width, img.height,
+                        len(data) / 1e6)
+    except Exception:
+        logger.warning("Reference %s isn't a readable image; sending it as-is", ref_id)
     return base64.b64encode(data).decode()
 
 def create_reference(prompt: str, feedback: str | None = None, model: str | None = None,
@@ -1030,13 +1047,16 @@ async def upload_reference(request: Request):
     ref_id = f"ref_{int(time.time())}_{hash(data) & 0xFFFF:04x}.png"
 
     # Convert to PNG if needed
+    dims = "not a readable image, saved as-is"
     try:
         img = Image.open(io.BytesIO(data))
         img.save(REFS_DIR / ref_id, "PNG")
+        dims = f"{img.width}x{img.height}"
     except Exception:
         # Save raw if it's already a valid image format
         with open(REFS_DIR / ref_id, "wb") as f:
             f.write(data)
+    logger.info("Reference uploaded: %s, %s, %.1f MB", ref_id, dims, (REFS_DIR / ref_id).stat().st_size / 1e6)
 
     return {"reference_id": ref_id}
 

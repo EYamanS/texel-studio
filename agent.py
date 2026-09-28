@@ -89,16 +89,17 @@ def _get_posthog_callback(distinct_id: str | None = None, trace_id: str | None =
 
 # ── Run logging ──
 
-def _message_size(messages) -> tuple[int, int]:
-    """Approximate text size and image count of a model request (inline images aren't counted as text)."""
-    chars = images = 0
+def _message_size(messages) -> tuple[int, int, int]:
+    """Approximate text size, image count and inline image bytes of a model request."""
+    chars = images = image_bytes = 0
     for m in messages:
         for part in (m.content if isinstance(m.content, list) else [m.content]):
             if isinstance(part, dict) and part.get("type") in ("image_url", "image"):
                 images += 1
+                image_bytes += len(str(part.get("image_url") or part))
             else:
                 chars += len(part.get("text", "") if isinstance(part, dict) else str(part))
-    return chars, images
+    return chars, images, image_bytes
 
 
 class AgentLogHandler(BaseCallbackHandler):
@@ -117,9 +118,10 @@ class AgentLogHandler(BaseCallbackHandler):
         self.calls += 1
         self._started[run_id] = (self.calls, time.monotonic())
         msgs = messages[0] if messages else []
-        chars, images = _message_size(msgs)
+        chars, images, image_bytes = _message_size(msgs)
         logger.info("[gen %s] model call #%d → %s (%d messages, ~%dk chars%s)", self.gen_id, self.calls,
-                    self.model_name, len(msgs), chars // 1000, f", {images} image(s)" if images else "")
+                    self.model_name, len(msgs), chars // 1000,
+                    f", {images} image(s) {image_bytes / 1e6:.1f} MB" if images else "")
 
     def on_llm_end(self, response, *, run_id, **kwargs):
         n, started = self._started.pop(run_id, (self.calls, time.monotonic()))
@@ -817,7 +819,8 @@ def run_agent_stream(
 
     started = time.monotonic()
     logger.info("[gen %s] agent %s: %s, %dx%d %s, reference %s", gen_id, "start" if is_new else "continues",
-                model_name, size, size, sprite_type, "yes" if reference_b64 else "no")
+                model_name, size, size, sprite_type,
+                f"{len(reference_b64) / 1e6:.1f} MB" if reference_b64 else "none")
 
     vision = _is_vision_model(model_name)
     full_toolset = vision  # small local models get the simplified toolset
