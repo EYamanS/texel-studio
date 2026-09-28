@@ -78,10 +78,15 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODELS = [m.strip() for m in os.getenv("OLLAMA_MODELS", "").split(",") if m.strip()]
 ALL_MODELS = GEMINI_MODELS + OPENAI_MODELS + OPENAI_MODELS_CUSTOM + OLLAMA_MODELS
 DEFAULT_MODEL = "gemini-3-flash-preview"
-IMAGE_GEN_MODELS = [
+GEMINI_IMAGE_MODELS = [
     "gemini-3.1-flash-image-preview",
 ]
-DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image-preview"
+# OpenAI-compatible image model names (NanoGPT, OpenAI gpt-image-1, etc.) registered via env.
+# Requests go to OPENAI_IMAGE_BASE_URL — see _openai_image_endpoint().
+OPENAI_IMAGE_MODELS = [m.strip() for m in os.getenv("OPENAI_IMAGE_MODELS", "").split(",") if m.strip()]
+OPENAI_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE") or "1024x1024"
+IMAGE_GEN_MODELS = list(dict.fromkeys(GEMINI_IMAGE_MODELS + OPENAI_IMAGE_MODELS))
+DEFAULT_IMAGE_MODEL = OPENAI_IMAGE_MODELS[0] if OPENAI_IMAGE_MODELS else GEMINI_IMAGE_MODELS[0]
 REFS_DIR = Path(__file__).parent / "references"
 REFS_DIR.mkdir(exist_ok=True)
 DB_PATH = Path(__file__).parent / "pixel_studio.db"
@@ -133,6 +138,120 @@ def gemini():
     if client is None:
         client = get_client()
     return client
+
+# ── Reference image providers ──
+
+def _gemini_image_bytes(model: str, prompt: str) -> bytes:
+    """Generate one image with Gemini and return its bytes."""
+    try:
+        # Try with response_modalities for Vertex AI
+        response = gemini().models.generate_content(
+            model=model,
+            contents=[prompt],
+            config=genai.types.GenerateContentConfig(
+                response_modalities=["Image", "Text"],
+            ),
+        )
+    except Exception:
+        # Fallback without response_modalities
+        response = gemini().models.generate_content(
+            model=model,
+            contents=[prompt],
+        )
+
+    def _part_bytes(part) -> bytes:
+        try:
+            buf = io.BytesIO()
+            part.as_image().save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception:
+            img_bytes = part.inline_data.data
+            if isinstance(img_bytes, str):
+                img_bytes = base64.b64decode(img_bytes)
+            return img_bytes
+
+    for part in response.parts or []:
+        if part.inline_data is not None:
+            return _part_bytes(part)
+
+    if hasattr(response, 'candidates') and response.candidates:
+        for candidate in response.candidates:
+            if hasattr(candidate, 'content') and candidate.content:
+                for part in candidate.content.parts:
+                    if hasattr(part, 'inline_data') and part.inline_data:
+                        return _part_bytes(part)
+
+    raise RuntimeError("No image in response. Model may not support image generation.")
+
+def _openai_image_endpoint() -> tuple[str, str | None]:
+    """Base URL and API key for OpenAI-compatible image requests."""
+    base_url = os.getenv("OPENAI_IMAGE_BASE_URL")
+    if base_url:
+        return base_url, os.getenv("OPENAI_IMAGE_API_KEY")
+    # No dedicated image endpoint — reuse the chat endpoint's base URL and key as a pair,
+    # so a key is never sent to a host it wasn't configured for.
+    return (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
+            os.getenv("OPENAI_IMAGE_API_KEY") or os.getenv("OPENAI_API_KEY"))
+
+def _openai_image_bytes(model: str, prompt: str) -> bytes:
+    """Generate one image via an OpenAI-compatible POST {base_url}/images/generations and return its bytes.
+
+    Plain urllib rather than the openai SDK: the SDK also attaches OPENAI_ORG_ID / OPENAI_PROJECT_ID /
+    OPENAI_CUSTOM_HEADERS from the environment, which must not leak to a third-party endpoint.
+    """
+    import urllib.error
+    import urllib.request
+    base_url, api_key = _openai_image_endpoint()
+    headers = {"Content-Type": "application/json", "User-Agent": "texel-studio/1.0"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    # No response_format: NanoGPT defaults to b64_json, and gpt-image-1 rejects the parameter.
+    body = json.dumps({"model": model, "prompt": prompt, "n": 1, "size": OPENAI_IMAGE_SIZE}).encode()
+    req = urllib.request.Request(f"{base_url.rstrip('/')}/images/generations", data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        try:
+            err = json.loads(detail).get("error")
+            detail = err.get("message", detail) if isinstance(err, dict) else (err or detail)
+        except Exception:
+            pass
+        raise RuntimeError(f"Image API returned HTTP {e.code}: {str(detail)[:500]}") from None
+
+    item = (data.get("data") or [None])[0] or {}
+    if item.get("b64_json"):
+        return base64.b64decode(item["b64_json"].split(",", 1)[-1])  # tolerate a data: URL prefix
+    if item.get("url"):
+        return _download_image_url(item["url"])
+    raise RuntimeError("No image in response. Model may not support image generation.")
+
+MAX_IMAGE_BYTES = 50 * 1024 * 1024
+
+def _download_image_url(url: str) -> bytes:
+    import urllib.parse
+    import urllib.request
+    # urllib would also open file:// (and friends) — only fetch remote or inline images.
+    if urllib.parse.urlparse(url).scheme not in ("http", "https", "data"):
+        raise RuntimeError(f"Refusing to download image from unsupported URL: {url[:100]}")
+    req = urllib.request.Request(url, headers={"User-Agent": "texel-studio/1.0"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        raw = resp.read(MAX_IMAGE_BYTES + 1)
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise RuntimeError(f"Image download exceeded {MAX_IMAGE_BYTES // (1024 * 1024)} MB")
+    return raw
+
+def _to_png(raw: bytes) -> bytes:
+    """References are served and sent to the agent as image/png — convert anything else (JPEG, WebP, ...)."""
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return raw
+    try:
+        buf = io.BytesIO()
+        Image.open(io.BytesIO(raw)).convert("RGBA").save(buf, format="PNG")
+    except Exception as e:
+        raise RuntimeError(f"Image model returned data that isn't a readable image: {e}") from None
+    return buf.getvalue()
 
 # ── Database ──
 
@@ -397,6 +516,26 @@ def load_reference_b64(ref_id: str | None) -> str | None:
     if not data:
         return None
     return base64.b64encode(data).decode()
+
+def create_reference(prompt: str, feedback: str | None = None, model: str | None = None,
+                     sprite_type: str = "block") -> str:
+    """Generate a concept-art reference image, save it, and return its reference_id."""
+    import storage as _storage
+    type_config = SPRITE_TYPES.get(sprite_type, SPRITE_TYPES["block"])
+    ref_prompt = f"{prompt}\n\n{type_config['ref_prompt']}"
+    if feedback:
+        ref_prompt += f"\n\nRevision feedback: {feedback}"
+
+    img_model = model if model in IMAGE_GEN_MODELS else DEFAULT_IMAGE_MODEL
+    # Explicitly configured OpenAI-compatible names win, even if they shadow a Gemini model name.
+    if img_model in OPENAI_IMAGE_MODELS:
+        raw = _openai_image_bytes(img_model, ref_prompt)
+    else:
+        raw = _gemini_image_bytes(img_model, ref_prompt)
+
+    ref_id = f"ref_{int(time.time())}_{hash(prompt) & 0xFFFF:04x}.png"
+    _storage.save_file(f"references/{ref_id}", _to_png(raw))
+    return ref_id
 
 def render_grid_overlay(img: Image.Image) -> Image.Image:
     """Add coordinate numbers to an upscaled image for AI position reference."""
@@ -791,55 +930,8 @@ def generate_reference(data: ReferenceRequest):
         return result
 
     try:
-        type_config = SPRITE_TYPES.get(data.sprite_type, SPRITE_TYPES["block"])
-        ref_prompt = f"{data.prompt}\n\n{type_config['ref_prompt']}"
-        if data.feedback:
-            ref_prompt += f"\n\nRevision feedback: {data.feedback}"
-
-        img_model = data.model if data.model in IMAGE_GEN_MODELS else DEFAULT_IMAGE_MODEL
-        try:
-            # Try with response_modalities for Vertex AI
-            response = gemini().models.generate_content(
-                model=img_model,
-                contents=[ref_prompt],
-                config=genai.types.GenerateContentConfig(
-                    response_modalities=["Image", "Text"],
-                ),
-            )
-        except Exception:
-            # Fallback without response_modalities
-            response = gemini().models.generate_content(
-                model=img_model,
-                contents=[ref_prompt],
-            )
-
-        import storage as _storage
-
-        def _save_ref_part(part):
-            ref_id = f"ref_{int(time.time())}_{hash(data.prompt) & 0xFFFF:04x}.png"
-            try:
-                buf = io.BytesIO()
-                part.as_image().save(buf, format="PNG")
-                _storage.save_file(f"references/{ref_id}", buf.getvalue())
-            except Exception:
-                img_bytes = part.inline_data.data
-                if isinstance(img_bytes, str):
-                    img_bytes = base64.b64decode(img_bytes)
-                _storage.save_file(f"references/{ref_id}", img_bytes)
-            return ref_id
-
-        for part in response.parts:
-            if part.inline_data is not None:
-                return {"reference_id": _save_ref_part(part)}
-
-        if hasattr(response, 'candidates') and response.candidates:
-            for candidate in response.candidates:
-                if hasattr(candidate, 'content') and candidate.content:
-                    for part in candidate.content.parts:
-                        if hasattr(part, 'inline_data') and part.inline_data:
-                            return {"reference_id": _save_ref_part(part)}
-
-        return JSONResponse({"error": "No image in response. Model may not support image generation."}, status_code=500)
+        ref_id = create_reference(data.prompt, feedback=data.feedback, model=data.model, sprite_type=data.sprite_type)
+        return {"reference_id": ref_id}
     except Exception as e:
         import traceback
         tb = traceback.format_exc()

@@ -112,7 +112,7 @@ You need at least one AI provider configured:
 - Add `GEMINI_API_KEY=your_key` to `.env`
 - Or use a Google Cloud service account for Vertex AI
 
-**OpenAI** (agent painting only, concept art still uses Gemini)
+**OpenAI** (agent painting; concept art uses Gemini unless you set `OPENAI_IMAGE_MODELS`, see below)
 - Add `OPENAI_API_KEY=your_key` to `.env`
 
 **OpenAI-compatible servers** (Llama.cpp, VLLM, LM Studio, OpenRouter, etc.)
@@ -124,9 +124,22 @@ You need at least one AI provider configured:
   ```
 - Models listed in `OPENAI_MODELS` appear in the model dropdown alongside the built-in OpenAI models.
 
+**OpenAI-compatible image models** (NanoGPT, OpenAI `gpt-image-1`, etc. — for concept art)
+- Point concept-art generation at any OpenAI-compatible `/images/generations` endpoint, e.g. [NanoGPT](https://nano-gpt.com):
+  ```bash
+  OPENAI_IMAGE_BASE_URL=https://nano-gpt.com/api/v1
+  OPENAI_IMAGE_API_KEY=your_nanogpt_key
+  OPENAI_IMAGE_MODELS=hidream,z-image-turbo,qwen-image,chroma
+  # OPENAI_IMAGE_SIZE=1024x1024   # default; e.g. 512x512 for cheaper, faster references
+  ```
+- Models listed in `OPENAI_IMAGE_MODELS` appear in the "concept model" dropdown; the first one is the default.
+- Without `OPENAI_IMAGE_BASE_URL`, image requests go to `OPENAI_BASE_URL` (or api.openai.com) with `OPENAI_API_KEY`.
+- Pick text-to-image models. Edit-only models such as `step-image-edit-2` cap prompts at 512 characters, and the concept-art prompts are longer than that.
+- If you run Redis workers, give them the same variables.
+
 All providers can be configured simultaneously — choose the model per generation in the UI.
 
-> **Want to run 100% free?** Install Ollama, pull a model, set `OLLAMA_MODELS` in `.env`, and you're done. No API keys needed. Concept art generation requires Gemini, but you can skip it and paint directly.
+> **Want to run 100% free?** Install Ollama, pull a model, set `OLLAMA_MODELS` in `.env`, and you're done. No API keys needed. Concept art generation needs Gemini or an OpenAI-compatible image model, but you can skip it and paint directly.
 
 ## Autotile Export
 
@@ -216,7 +229,7 @@ Built-in kinds:
 |---|---|
 | `sprite.generate` | AI-paints a sprite from a prompt |
 | `sprite.chat` | Continues editing an existing sprite via chat |
-| `sprite.reference` | Generates concept art (Gemini image gen) |
+| `sprite.reference` | Generates concept art (Gemini or OpenAI-compatible image models) |
 | `sprite.tileset` | Builds the 16-variant autotile from a base sprite |
 | `sprite.from_photo` | Quantizes a photo to the chosen palette |
 

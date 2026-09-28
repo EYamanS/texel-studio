@@ -11,11 +11,9 @@ Requires REDIS_URL environment variable.
 
 import os
 import sys
-import io
 import json
 import time
 import uuid
-import base64
 import signal
 from pathlib import Path
 
@@ -28,12 +26,11 @@ import redis
 from server import (
     sse_event, load_reference_b64, upscale_image, pixels_to_image,
     SPRITE_TYPES, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT,
-    DEFAULT_IMAGE_MODEL, IMAGE_GEN_MODELS,
+    create_reference,
     gemini,
 )
 import storage
 from agent import run_agent_stream as agent_run
-from google import genai
 
 # Initialize Gemini credentials (sets GOOGLE_APPLICATION_CREDENTIALS if using service account)
 try:
@@ -191,64 +188,15 @@ def handle_generate(job: dict):
 def handle_reference(job: dict):
     """Generate concept art. No SQLite dependency."""
     job_id = job["job_id"]
-    prompt = job["prompt"]
-    feedback = job.get("feedback")
-    model = job.get("model", DEFAULT_IMAGE_MODEL)
-    sprite_type = job.get("sprite_type", "block")
 
     try:
-        type_config = SPRITE_TYPES.get(sprite_type, SPRITE_TYPES["block"])
-        ref_prompt = f"{prompt}\n\n{type_config['ref_prompt']}"
-        if feedback:
-            ref_prompt += f"\n\nRevision feedback: {feedback}"
-
-        img_model = model if model in IMAGE_GEN_MODELS else DEFAULT_IMAGE_MODEL
-
-        try:
-            response = gemini().models.generate_content(
-                model=img_model,
-                contents=[ref_prompt],
-                config=genai.types.GenerateContentConfig(
-                    response_modalities=["Image", "Text"],
-                ),
-            )
-        except Exception:
-            response = gemini().models.generate_content(
-                model=img_model,
-                contents=[ref_prompt],
-            )
-
-        def _save_ref_part(part):
-            rid = f"ref_{int(time.time())}_{hash(prompt) & 0xFFFF:04x}.png"
-            try:
-                buf = io.BytesIO()
-                part.as_image().save(buf, format="PNG")
-                storage.save_file(f"references/{rid}", buf.getvalue())
-            except Exception:
-                img_bytes = part.inline_data.data
-                if isinstance(img_bytes, str):
-                    img_bytes = base64.b64decode(img_bytes)
-                storage.save_file(f"references/{rid}", img_bytes)
-            return rid
-
-        ref_id = None
-        for part in response.parts:
-            if part.inline_data is not None:
-                ref_id = _save_ref_part(part)
-                break
-
-        if not ref_id and hasattr(response, 'candidates') and response.candidates:
-            for candidate in response.candidates:
-                if hasattr(candidate, 'content') and candidate.content:
-                    for part in candidate.content.parts:
-                        if hasattr(part, 'inline_data') and part.inline_data:
-                            ref_id = _save_ref_part(part)
-                            break
-
-        if ref_id:
-            r.publish(f"texel:result:{job_id}", json.dumps({"reference_id": ref_id}))
-        else:
-            r.publish(f"texel:result:{job_id}", json.dumps({"error": "No image in response"}))
+        ref_id = create_reference(
+            job["prompt"],
+            feedback=job.get("feedback"),
+            model=job.get("model"),
+            sprite_type=job.get("sprite_type", "block"),
+        )
+        r.publish(f"texel:result:{job_id}", json.dumps({"reference_id": ref_id}))
 
     except Exception as e:
         import traceback
