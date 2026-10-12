@@ -19,6 +19,9 @@ from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 # ── Checkpointer factory ──
@@ -548,11 +551,13 @@ def _get_llm(model_name: str, temperature: float = 0.7):
     # Ollama models (OpenAI-compatible API)
     if model_name in OLLAMA_MODELS:
         from langchain_openai import ChatOpenAI
+        num_ctx = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
         return ChatOpenAI(
             model=model_name,
             temperature=temperature,
             base_url=f"{OLLAMA_URL}/v1",
             api_key="ollama",
+            extra_body={"options": {"num_ctx": num_ctx}},
         )
 
     # OpenAI / OpenAI-compatible models (custom names registered via OPENAI_MODELS, or standard prefixes)
