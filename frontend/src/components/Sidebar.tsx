@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { imageUrl } from "@/lib/api";
+import { AgentPanel } from "@/components/AgentPanel";
 
 export function Sidebar({ studio }: { studio: any }) {
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -16,6 +17,8 @@ export function Sidebar({ studio }: { studio: any }) {
       className="w-[300px] shrink-0 flex flex-col h-screen"
       style={{ borderLeft: "1px solid var(--border)" }}
     >
+      <AgentPanel studio={studio} />
+
       {/* ── History ── */}
       <div className="flex-1 overflow-hidden flex flex-col">
         <div className="px-3.5 py-3" style={{ borderBottom: "1px solid var(--border)" }}>
@@ -55,7 +58,7 @@ export function Sidebar({ studio }: { studio: any }) {
                   {/* Thumbnail */}
                   {g.image_path ? (
                     <img
-                      src={imageUrl(g.image_path.replace(".png", "_preview.png").replace("_preview_preview", "_preview"))}
+                      src={imageUrl(`gen_${g.id}_preview.png`)}
                       alt=""
                       style={{
                         width: 36,
@@ -85,7 +88,7 @@ export function Sidebar({ studio }: { studio: any }) {
                       {g.prompt}
                     </div>
                     <div style={{ fontSize: "9px", color: "var(--text-faint)", marginTop: 1 }}>
-                      {g.size}x{g.size}
+                      {g.width ?? g.size}x{g.height ?? g.size}
                       {" \u00B7 "}
                       {g.model?.split("-").slice(-2).join("-") || "?"}
                       {" \u00B7 "}

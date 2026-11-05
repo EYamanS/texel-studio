@@ -8,7 +8,7 @@ export function Canvas({ studio }: { studio: any }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const prevPixelsRef = useRef<number[][] | null>(null);
-  const prevSizeRef = useRef<number>(0);
+  const prevDimsRef = useRef<string>("");
   const prevPaletteRef = useRef<string[] | null>(null);
   const rafRef = useRef<number>(0);
   const [pixelInfo, setPixelInfo] = useState("");
@@ -18,6 +18,10 @@ export function Canvas({ studio }: { studio: any }) {
   const [canvasDisplaySize, setCanvasDisplaySize] = useState(512);
 
   const { pixelData, spriteSize, currentPalette, selectedColorIdx, status } = studio;
+  // Non-square designs (e.g. a 52x72 card) use only a width x height rectangle of the square canvas.
+  const spriteW: number = studio.spriteW ?? spriteSize;
+  const spriteH: number = studio.spriteH ?? spriteSize;
+  const side = Math.max(spriteW, spriteH);
 
   // Resize canvas to fill available space
   useEffect(() => {
@@ -29,14 +33,14 @@ export function Canvas({ studio }: { studio: any }) {
       const availH = rect.height - 160;
       const available = Math.min(availW, availH);
       const maxSize = Math.max(256, Math.min(available, 800));
-      // Snap to pixel-perfect multiple of spriteSize
-      const scale = Math.floor(maxSize / spriteSize);
-      setCanvasDisplaySize(scale * spriteSize);
+      // Snap to pixel-perfect multiple of the longer side
+      const scale = Math.floor(maxSize / side);
+      setCanvasDisplaySize(scale * side);
     };
     resize();
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
-  }, [spriteSize]);
+  }, [side]);
 
   // Full canvas redraw
   const drawFull = useCallback(() => {
@@ -44,17 +48,17 @@ export function Canvas({ studio }: { studio: any }) {
     if (!canvas || !pixelData || !currentPalette) return;
     const ctx = canvas.getContext("2d")!;
     ctx.imageSmoothingEnabled = false;
-    const scale = Math.floor(canvasDisplaySize / spriteSize);
-    canvas.width = spriteSize * scale;
-    canvas.height = spriteSize * scale;
+    const scale = Math.floor(canvasDisplaySize / side);
+    canvas.width = spriteW * scale;
+    canvas.height = spriteH * scale;
 
-    for (let y = 0; y < spriteSize; y++)
-      for (let x = 0; x < spriteSize; x++) {
+    for (let y = 0; y < spriteH; y++)
+      for (let x = 0; x < spriteW; x++) {
         ctx.fillStyle = (x + y) % 2 === 0 ? "#18160f" : "#13110c";
         ctx.fillRect(x * scale, y * scale, scale, scale);
       }
-    for (let y = 0; y < pixelData.length; y++)
-      for (let x = 0; x < (pixelData[y]?.length || 0); x++) {
+    for (let y = 0; y < Math.min(pixelData.length, spriteH); y++)
+      for (let x = 0; x < Math.min(pixelData[y]?.length || 0, spriteW); x++) {
         const idx = pixelData[y][x];
         if (idx >= 0 && idx < currentPalette.colors.length) {
           ctx.fillStyle = currentPalette.colors[idx];
@@ -63,25 +67,27 @@ export function Canvas({ studio }: { studio: any }) {
       }
     if (scale > 6) {
       ctx.strokeStyle = "rgba(255,255,255,0.03)";
-      for (let i = 0; i <= spriteSize; i++) {
+      for (let i = 0; i <= spriteW; i++) {
         ctx.beginPath(); ctx.moveTo(i * scale + 0.5, 0); ctx.lineTo(i * scale + 0.5, canvas.height); ctx.stroke();
+      }
+      for (let i = 0; i <= spriteH; i++) {
         ctx.beginPath(); ctx.moveTo(0, i * scale + 0.5); ctx.lineTo(canvas.width, i * scale + 0.5); ctx.stroke();
       }
     }
     prevPixelsRef.current = pixelData.map((row: number[]) => [...row]);
-    prevSizeRef.current = spriteSize;
+    prevDimsRef.current = `${spriteW}x${spriteH}`;
     prevPaletteRef.current = [...currentPalette.colors];
-  }, [pixelData, spriteSize, currentPalette, canvasDisplaySize]);
+  }, [pixelData, spriteW, spriteH, side, currentPalette, canvasDisplaySize]);
 
   // Diff-only pixel update
   const drawDiff = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || !pixelData || !currentPalette || !prevPixelsRef.current) return;
     const ctx = canvas.getContext("2d")!;
-    const scale = Math.floor(canvasDisplaySize / spriteSize);
+    const scale = Math.floor(canvasDisplaySize / side);
 
-    for (let y = 0; y < pixelData.length; y++)
-      for (let x = 0; x < (pixelData[y]?.length || 0); x++) {
+    for (let y = 0; y < Math.min(pixelData.length, spriteH); y++)
+      for (let x = 0; x < Math.min(pixelData[y]?.length || 0, spriteW); x++) {
         const newIdx = pixelData[y][x];
         const oldIdx = prevPixelsRef.current[y]?.[x] ?? -1;
         if (newIdx !== oldIdx) {
@@ -94,7 +100,7 @@ export function Canvas({ studio }: { studio: any }) {
         }
       }
     prevPixelsRef.current = pixelData.map((row: number[]) => [...row]);
-  }, [pixelData, spriteSize, currentPalette, canvasDisplaySize]);
+  }, [pixelData, spriteW, spriteH, side, currentPalette, canvasDisplaySize]);
 
   // Render — decides between full and diff
   useEffect(() => {
@@ -102,26 +108,26 @@ export function Canvas({ studio }: { studio: any }) {
     rafRef.current = requestAnimationFrame(() => {
       const needsFull =
         !prevPixelsRef.current ||
-        prevSizeRef.current !== spriteSize ||
+        prevDimsRef.current !== `${spriteW}x${spriteH}` ||
         !prevPaletteRef.current ||
         prevPaletteRef.current.length !== currentPalette?.colors?.length ||
         prevPaletteRef.current.some((c: string, i: number) => c !== currentPalette?.colors[i]);
       if (needsFull) drawFull(); else drawDiff();
     });
     return () => cancelAnimationFrame(rafRef.current);
-  }, [pixelData, spriteSize, currentPalette, canvasDisplaySize, drawFull, drawDiff]);
+  }, [pixelData, spriteW, spriteH, currentPalette, canvasDisplaySize, drawFull, drawDiff]);
 
   // Get pixel coordinates from mouse event
   const getPixel = useCallback((e: React.MouseEvent) => {
     const canvas = canvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
-    const scale = canvasDisplaySize / spriteSize;
+    const scale = Math.floor(canvasDisplaySize / side);
     const x = Math.floor((e.clientX - rect.left) / scale);
     const y = Math.floor((e.clientY - rect.top) / scale);
-    if (x < 0 || x >= spriteSize || y < 0 || y >= spriteSize) return null;
+    if (x < 0 || x >= spriteW || y < 0 || y >= spriteH) return null;
     return { x, y };
-  }, [spriteSize, canvasDisplaySize]);
+  }, [spriteW, spriteH, side, canvasDisplaySize]);
 
   const paint = (e: React.MouseEvent) => {
     const p = getPixel(e);
@@ -150,15 +156,14 @@ export function Canvas({ studio }: { studio: any }) {
   // Export PNG
   const exportPng = (upscale: boolean) => {
     if (!pixelData || !currentPalette) return;
-    const sz = upscale ? 512 : spriteSize;
-    const sc = upscale ? Math.floor(512 / spriteSize) : 1;
+    const sc = upscale ? Math.floor(512 / side) : 1;
     const c = document.createElement("canvas");
-    c.width = sz;
-    c.height = sz;
+    c.width = spriteW * sc;
+    c.height = spriteH * sc;
     const ctx = c.getContext("2d")!;
     ctx.imageSmoothingEnabled = false;
-    for (let y = 0; y < pixelData.length; y++) {
-      for (let x = 0; x < pixelData[y].length; x++) {
+    for (let y = 0; y < Math.min(pixelData.length, spriteH); y++) {
+      for (let x = 0; x < Math.min(pixelData[y].length, spriteW); x++) {
         const idx = pixelData[y][x];
         if (idx >= 0 && idx < currentPalette.colors.length) {
           ctx.fillStyle = currentPalette.colors[idx];
@@ -167,7 +172,7 @@ export function Canvas({ studio }: { studio: any }) {
       }
     }
     const a = document.createElement("a");
-    a.download = `sprite_${spriteSize}x${spriteSize}${upscale ? "_512" : ""}.png`;
+    a.download = `sprite_${spriteW}x${spriteH}${upscale ? "_512" : ""}.png`;
     a.href = c.toDataURL("image/png");
     a.click();
   };
@@ -218,7 +223,7 @@ export function Canvas({ studio }: { studio: any }) {
         {/* Toolbar */}
         <div className="flex items-center gap-2 mb-3">
           <span style={{ fontSize: "10px", color: "var(--text-faint)", fontWeight: 500 }}>
-            {spriteSize}x{spriteSize}
+            {spriteW}x{spriteH}
           </span>
           <div style={{ width: 1, height: 12, background: "var(--border)" }} />
           <button className="btn" onClick={() => exportPng(false)}>png</button>
@@ -234,8 +239,8 @@ export function Canvas({ studio }: { studio: any }) {
           transition={{ duration: 0.3 }}
           style={{
             imageRendering: "pixelated",
-            width: canvasDisplaySize,
-            height: canvasDisplaySize,
+            width: spriteW * Math.floor(canvasDisplaySize / side),
+            height: spriteH * Math.floor(canvasDisplaySize / side),
             border: "1px solid var(--border)",
             cursor: "crosshair",
             boxShadow: "0 0 80px rgba(200,164,78,0.03)",

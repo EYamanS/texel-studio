@@ -1,8 +1,10 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
-import { api, apiRaw } from "@/lib/api";
-import type { Palette, Generation, Settings, LogEntry } from "@/lib/types";
+import { useState, useCallback, useRef, useEffect } from "react";
+import { api, apiRaw, liveUrl, API_BASE } from "@/lib/api";
+import type { Palette, Generation, Settings, LogEntry, AgentInfo } from "@/lib/types";
+
+const FOLLOW_KEY = "texel.followAgent";
 
 export function useStudio() {
   // Settings
@@ -16,6 +18,8 @@ export function useStudio() {
   // Generation
   const [pixelData, setPixelData] = useState<number[][] | null>(null);
   const [spriteSize, setSpriteSize] = useState(16);
+  // Usable rectangle of the open design (differs from spriteSize for non-square designs such as 52x72 cards)
+  const [spriteRect, setSpriteRect] = useState<{ w: number; h: number } | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [logs, setLogs] = useState<{ step: string; message: string }[]>([]);
   const [status, setStatus] = useState<{ type: "idle" | "generating" | "complete" | "error"; message: string }>({ type: "idle", message: "" });
@@ -28,6 +32,12 @@ export function useStudio() {
   // Reference
   const [referenceId, setReferenceId] = useState<string | null>(null);
   const [refConfirmed, setRefConfirmed] = useState(false);
+
+  // Agent bridge (designs painted from outside the UI, e.g. by Claude Code through the texel_paint CLI)
+  const [agentLive, setAgentLive] = useState(false);
+  const [followAgent, setFollowAgentState] = useState(true);
+  const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
+  const [agentActivity, setAgentActivity] = useState<{ id: number; at: number } | null>(null);
 
   // Abort
   const abortRef = useRef<AbortController | null>(null);
@@ -78,7 +88,7 @@ export function useStudio() {
 
   // ── Reference ──
   const generateReference = useCallback(async (prompt: string, model: string, spriteType: string) => {
-    const res = await fetch("http://localhost:8500/api/reference", {
+    const res = await fetch(`${API_BASE}/reference`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt, feedback: null, model, sprite_type: spriteType }),
@@ -103,7 +113,7 @@ export function useStudio() {
   const uploadReference = useCallback(async (file: File) => {
     const formData = new FormData();
     formData.append("file", file);
-    const res = await fetch("http://localhost:8500/api/reference/upload", { method: "POST", body: formData });
+    const res = await fetch(`${API_BASE}/reference/upload`, { method: "POST", body: formData });
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
     setReferenceId(data.reference_id);
@@ -150,6 +160,7 @@ export function useStudio() {
     }
 
     setSpriteSize(opts.size);
+    setSpriteRect(null);
     setPixelData(Array.from({ length: opts.size }, () => Array(opts.size).fill(-1)));
     setLogs([]);
     setStatus({ type: "generating", message: "Starting..." });
@@ -158,7 +169,7 @@ export function useStudio() {
     abortRef.current = new AbortController();
 
     try {
-      const res = await fetch("http://localhost:8500/api/generate", {
+      const res = await fetch(`${API_BASE}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: abortRef.current.signal,
@@ -236,7 +247,7 @@ export function useStudio() {
     setStatus({ type: "generating", message: "Agent editing..." });
 
     try {
-      const res = await fetch("http://localhost:8500/api/chat", {
+      const res = await fetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ generation_id: activeGenId, message }),
@@ -291,7 +302,10 @@ export function useStudio() {
     setCurrentGen(gen);
     if (gen.pixel_data) setPixelData(gen.pixel_data);
     if (gen.size) setSpriteSize(gen.size);
-    if (gen.palette) setCurrentPalette((prev) => prev ? { ...prev, colors: gen.palette! } : prev);
+    setSpriteRect(gen.size ? { w: gen.width ?? gen.size, h: gen.height ?? gen.size } : null);
+    // Each design stores its own palette (the API returns it as `colors`).
+    const designColors = gen.colors ?? gen.palette;
+    if (designColors) setCurrentPalette((prev) => prev ? { ...prev, colors: designColors } : prev);
     if (gen.logs) setLogs(gen.logs.map((l) => ({ step: l.step, message: l.message || "" })));
     setActiveGenId(gen.id);
   }, []);
@@ -318,10 +332,45 @@ export function useStudio() {
     });
   }, []);
 
+  // ── Live updates from outside the UI (SSE) ──
+  // Refs keep the event handlers current without re-subscribing.
+  const latest = useRef({ activeGenId, isGenerating, followAgent, loadGeneration, loadHistory });
+  latest.current = { activeGenId, isGenerating, followAgent, loadGeneration, loadHistory };
+
+  const setFollowAgent = useCallback((value: boolean) => {
+    setFollowAgentState(value);
+    try { window.localStorage.setItem(FOLLOW_KEY, value ? "1" : "0"); } catch {}
+  }, []);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(FOLLOW_KEY);
+      if (stored !== null) setFollowAgentState(stored === "1");
+    } catch {}
+    api<AgentInfo>("/agent").then(setAgentInfo).catch(() => {});
+
+    const source = new EventSource(liveUrl);
+    source.addEventListener("hello", () => setAgentLive(true));
+    source.onerror = () => setAgentLive(false);   // EventSource reconnects by itself
+    source.addEventListener("generation", (event) => {
+      const info = JSON.parse((event as MessageEvent).data) as { id: number; model?: string; created: boolean };
+      const { activeGenId, isGenerating, followAgent, loadGeneration, loadHistory } = latest.current;
+      loadHistory();
+      if (isGenerating) return;                    // the UI's own stream is already drawing
+      const fromAgent = info.model === "texel-paint";
+      if (fromAgent) setAgentActivity({ id: info.id, at: Date.now() });
+      if (activeGenId === info.id || (fromAgent && followAgent)) loadGeneration(info.id);
+    });
+    source.addEventListener("deleted", () => latest.current.loadHistory());
+    return () => source.close();
+  }, []);
+
   return {
     // State
     settings, palettes, currentPalette, selectedColorIdx,
-    pixelData, spriteSize, isGenerating, logs, status,
+    pixelData, spriteSize, spriteW: spriteRect?.w ?? spriteSize, spriteH: spriteRect?.h ?? spriteSize,
+    agentLive, followAgent, setFollowAgent, agentInfo, agentActivity,
+    isGenerating, logs, status,
     activeGenId, currentGen, generations,
     referenceId, refConfirmed,
 
