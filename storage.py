@@ -39,7 +39,8 @@ def _get_s3():
 
 
 # Local filesystem paths (used as fallback)
-BASE_DIR = Path(__file__).parent
+# TEXEL_HOME relocates the data folder (output/, references/); shared with the texel_paint CLI and server.py
+BASE_DIR = Path(os.getenv("TEXEL_HOME") or Path(__file__).parent)
 LOCAL_OUTPUT = BASE_DIR / "output"
 LOCAL_REFS = BASE_DIR / "references"
 LOCAL_OUTPUT.mkdir(exist_ok=True)

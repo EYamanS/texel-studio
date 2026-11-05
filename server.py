@@ -82,10 +82,12 @@ IMAGE_GEN_MODELS = [
     "gemini-3.1-flash-image-preview",
 ]
 DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image-preview"
-REFS_DIR = Path(__file__).parent / "references"
+REFS_DIR = Path(os.getenv("TEXEL_HOME") or Path(__file__).parent) / "references"
 REFS_DIR.mkdir(exist_ok=True)
-DB_PATH = Path(__file__).parent / "pixel_studio.db"
-OUTPUT_DIR = Path(__file__).parent / "output"
+# TEXEL_HOME relocates the database and output folder (shared with the texel_paint CLI, see docs/PAINT_CLI.md)
+DATA_DIR = Path(os.getenv("TEXEL_HOME") or Path(__file__).parent)
+DB_PATH = DATA_DIR / "pixel_studio.db"
+OUTPUT_DIR = DATA_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # ── Gemini Client ──
@@ -186,6 +188,11 @@ def init_db():
         conn.execute("ALTER TABLE generations ADD COLUMN sprite_type TEXT DEFAULT 'block'")
     if not _has_column(conn, "generations", "reference_id"):
         conn.execute("ALTER TABLE generations ADD COLUMN reference_id TEXT")
+    # width/height: usable rectangle of non-square sprites (NULL = square, `size` x `size`)
+    if not _has_column(conn, "generations", "width"):
+        conn.execute("ALTER TABLE generations ADD COLUMN width INTEGER")
+    if not _has_column(conn, "generations", "height"):
+        conn.execute("ALTER TABLE generations ADD COLUMN height INTEGER")
 
     # Insert default palette if none exist
     if conn.execute("SELECT COUNT(*) FROM palettes").fetchone()[0] == 0:
@@ -213,8 +220,12 @@ def get_db():
 
 # ── Image construction ──
 
-def pixels_to_image(pixel_data: list[list[int]], palette: list[str], size: int) -> Image.Image:
-    """Convert 2D array of palette indices to PIL Image."""
+def pixels_to_image(pixel_data: list[list[int]], palette: list[str], size: int,
+                    width: Optional[int] = None, height: Optional[int] = None) -> Image.Image:
+    """Convert 2D array of palette indices to PIL Image.
+
+    Palette colors may carry alpha as #rrggbbaa. width/height crop to the usable rectangle of a non-square design.
+    """
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     for y, row in enumerate(pixel_data):
         for x, idx in enumerate(row):
@@ -224,7 +235,10 @@ def pixels_to_image(pixel_data: list[list[int]], palette: list[str], size: int) 
             r = int(hex_color[1:3], 16)
             g = int(hex_color[3:5], 16)
             b = int(hex_color[5:7], 16)
-            img.putpixel((x, y), (r, g, b, 255))
+            a = int(hex_color[7:9], 16) if len(hex_color) == 9 else 255
+            img.putpixel((x, y), (r, g, b, a))
+    if width or height:
+        img = img.crop((0, 0, min(width or size, size), min(height or size, size)))
     return img
 
 def image_to_base64(img: Image.Image) -> str:
@@ -935,6 +949,9 @@ def delete_generation(gen_id: int):
             p = OUTPUT_DIR / gen["image_path"].replace(".png", f"{suffix}.png")
             if p.exists():
                 p.unlink()
+        preview = OUTPUT_DIR / f"gen_{gen_id}_preview.png"
+        if preview.exists():
+            preview.unlink()
     db.execute("DELETE FROM generation_logs WHERE generation_id = ?", (gen_id,))
     db.execute("DELETE FROM generations WHERE id = ?", (gen_id,))
     db.commit()
@@ -1017,18 +1034,20 @@ def manual_pixel_update(gen_id: int, data: ManualPixelUpdate):
     pixel_data = json.loads(gen["pixel_data"])
     palette = json.loads(gen["colors"]) if gen["colors"] else ["#c8a44e"]
     size = gen["size"]
+    width, height = gen["width"] or size, gen["height"] or size
 
     for u in data.updates:
         x, y, c = u.get("x", 0), u.get("y", 0), u.get("color", -1)
-        if 0 <= y < size and 0 <= x < size:
+        if 0 <= y < height and 0 <= x < width:
             pixel_data[y][x] = c
 
     # Rebuild image
     import storage as _storage
-    img = pixels_to_image(pixel_data, palette, size)
-    filename = f"gen_{gen_id}_{size}x{size}.png"
+    img = pixels_to_image(pixel_data, palette, size, width, height)
+    filename = f"gen_{gen_id}_{width}x{height}.png"
     _storage.save_image(img, f"output/{filename}")
-    _storage.save_image(upscale_image(img, 512), f"output/gen_{gen_id}_preview.png")
+    scale = max(1, 512 // max(img.width, img.height))
+    _storage.save_image(img.resize((img.width * scale, img.height * scale), Image.NEAREST), f"output/gen_{gen_id}_preview.png")
 
     db.execute("UPDATE generations SET pixel_data = ? WHERE id = ?",
                (json.dumps(pixel_data), gen_id))
@@ -1188,6 +1207,67 @@ def get_tileset_preview(name: str):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+# ── Live updates and agent bridge ──
+#
+# Designs can be created and edited from outside the UI, for example by the texel_paint CLI that Claude Code
+# (or any other coding agent) drives. The UI subscribes to /api/live and reloads the history / the open design
+# as soon as something changes, so you can watch an agent paint.
+
+LIVE_POLL_SECONDS = 0.6
+LIVE_HEARTBEAT_SECONDS = 15
+
+def _live_fingerprint() -> dict:
+    """{design id: (iterations, status, pixel_data length, size, width, height, model)}. Changes whenever a design is edited."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, iterations, status, LENGTH(pixel_data) AS n, size, width, height, model FROM generations"
+    ).fetchall()
+    db.close()
+    return {r["id"]: (r["iterations"], r["status"], r["n"], r["size"], r["width"], r["height"], r["model"]) for r in rows}
+
+@app.get("/api/live")
+async def live_events(request: Request):
+    """Server-sent events: `generation` (created/changed, with id and model) and `deleted` events."""
+    import asyncio
+
+    async def stream():
+        known = await asyncio.to_thread(_live_fingerprint)
+        yield "event: hello\ndata: {}\n\n"
+        idle = 0.0
+        while True:
+            if await request.is_disconnected():
+                return
+            await asyncio.sleep(LIVE_POLL_SECONDS)
+            current = await asyncio.to_thread(_live_fingerprint)
+            events = [("generation", {"id": gid, "model": fp[6], "created": gid not in known})
+                      for gid, fp in current.items() if known.get(gid) != fp]
+            events += [("deleted", {"id": gid}) for gid in known if gid not in current]
+            known = current
+            for name, payload in events:
+                yield f"event: {name}\ndata: {json.dumps(payload)}\n\n"
+            idle = 0.0 if events else idle + LIVE_POLL_SECONDS
+            if idle >= LIVE_HEARTBEAT_SECONDS:
+                idle = 0.0
+                yield ": keep-alive\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+@app.get("/api/agent")
+def agent_info():
+    """What the UI shows in the 'Paint with an agent' panel: how to reach the CLI from this installation."""
+    try:
+        from texel_paint import __version__ as cli_version
+    except Exception:
+        cli_version = None
+    return {
+        "cli_version": cli_version,
+        "cli_command": "python -m texel_paint",
+        "project_dir": str(Path(__file__).parent.resolve()),
+        "data_dir": str(DATA_DIR.resolve()),
+        "source_label": "texel-paint",
+    }
 
 @app.get("/api/settings")
 def get_settings():
