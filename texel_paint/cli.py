@@ -218,8 +218,9 @@ def run(args) -> int:
 
 
 def main(argv=None) -> int:
-    guard.start()
     args = build_parser().parse_args(argv)
+    if args.cmd != "serve":      # the web server runs until you stop it, the watchdog is only for painting runs
+        guard.start()
     try:
         return run(args)
     except (ValueError, FileNotFoundError) as exc:
