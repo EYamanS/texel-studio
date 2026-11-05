@@ -1,5 +1,8 @@
+// The page is normally served by the backend itself, so the API lives on the same origin (works with any port,
+// e.g. `python -m texel_paint serve --port 8501`). Only the Next dev server (port 3000) needs the backend on 8500.
 // Override at build time to serve the API from another origin: NEXT_PUBLIC_API_BASE=http://localhost:9000/api
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8500/api";
+const onNextDevServer = typeof window !== "undefined" && window.location.port === "3000";
+export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? (onNextDevServer ? "http://localhost:8500/api" : "/api");
 
 export async function api<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
