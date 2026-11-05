@@ -66,6 +66,7 @@ Diffusion models hallucinate pixels. This tool places them.
 - **Autotile generation** — generate all 16 edge variants for tilemap use
 - **Export** — native PNG, upscaled preview, or full tileset folder
 - **History** — browse and reload past generations
+- **Paint with Claude Code (no API key)** — a coding agent paints through the `texel_paint` CLI and you watch it live in the UI (see below)
 - **S3 storage** — optional S3-compatible object storage for shared file access across workers
 - **Observability** — optional LangSmith and/or PostHog LLM analytics tracing
 
@@ -88,6 +89,30 @@ python server.py
 ```
 
 Open `http://localhost:8500`
+
+On Windows use `start.bat` instead of `start.sh`. `python -m texel_paint doctor` checks your setup at any time.
+
+## Paint with Claude Code (no API key)
+
+You do not need Gemini, OpenAI or Ollama to use Texel Studio. Any coding agent, for example
+[Claude Code](https://claude.com/claude-code), can be the painter: it calls the `texel_paint` CLI, which draws into the
+same database as the web app. Everything it paints appears **live** in the UI history, where you can keep editing by hand,
+export PNGs and generate tilesets.
+
+```bash
+pip install Pillow                  # all the CLI needs
+python -m texel_paint doctor        # setup check with next steps
+python -m texel_paint serve         # optional: the web UI on http://127.0.0.1:8500
+claude                              # in this folder: Claude Code reads CLAUDE.md and knows the tools
+```
+
+Then ask: *"Paint a 32x32 iron sword with texel_paint and check it with lint."*
+
+Built for **many designs at low token cost**: one batch file builds a whole set, quality checks (`lint`) come back as text, and
+you review a single overview picture. Beyond the original agent tools it adds rectangular canvases, alpha colours, bevel/rim
+light, dithered gradients, automatic outlines, heart/leaf/star/disc shapes, gems and card frames, stamps, macros and loops,
+recolour variants, mock-ups and `ship` (write PNGs straight into your game project with backups).
+Full reference: [docs/PAINT_CLI.md](docs/PAINT_CLI.md). Agent instructions: [CLAUDE.md](CLAUDE.md) / [AGENTS.md](AGENTS.md).
 
 ## Authentication
 
