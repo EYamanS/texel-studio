@@ -15,3 +15,6 @@ frontend/.next/
 
 # Local IDE / agent config
 .claude/
+
+# texel_paint scratch space (undo snapshots, stamps, macros, previews)
+paint_work/
